@@ -1,0 +1,11 @@
+CompileFlags:
+  Add:
+    - "-xc++"
+    - "-std=c++14"
+    - "-Iinclude"
+    - "-include"
+    - "Arduino.h"
+    - "-Wno-unknown-attributes"
+
+Diagnostics:
+  Suppress: ["*"]

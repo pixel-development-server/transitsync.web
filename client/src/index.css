@@ -1,0 +1,518 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens.
+ *
+ * Light is the default console theme: a clean, soft-shadowed SaaS surface
+ * (white cards on `#F8FAFC`, deep royal blue accent). The dark "operations wall"
+ * theme is still available behind the sidebar toggle and is expressed purely by
+ * overriding the same variables under `.dark`.
+ *
+ * Every colour the app references — the semantic `ink` (surfaces) and `mist`
+ * (text) ramps, the `brand` accent, plus the specific Tailwind palette shades
+ * used for status pills — is backed by a CSS variable here. That means a page
+ * never needs a theme-specific class: `text-mist-100` is charcoal on light and
+ * near-white on dark without a single `dark:` override.
+ */
+@theme {
+  /* --- Surfaces (light default) ------------------------------------------ */
+  /* Spec anchors: #F8FAFC canvas, #E2E8F0 hairlines, #FFFFFF cards. */
+  --color-ink-950: #f8fafc;
+  --color-ink-900: #ffffff;
+  --color-ink-850: #f1f5f9;
+  --color-ink-800: #f1f5f9;
+  --color-ink-700: #e2e8f0;
+  --color-ink-600: #cbd5e1;
+  --color-ink-500: #94a3b8;
+
+  /* --- Text (light default) ---------------------------------------------- */
+  --color-mist-100: #0f172a;
+  --color-mist-200: #1e293b;
+  --color-mist-300: #334155;
+  --color-mist-400: #475569;
+  /* A touch darker than slate-500 so 11px muted captions clear WCAG AA (4.5:1)
+     on the sunken KPI surface (#f1f5f9), not just on pure white. */
+  --color-mist-500: #5f6b7a;
+
+  /* --- Brand accent ------------------------------------------------------ */
+  --color-brand-300: #3b6bff;
+  --color-brand-400: #1d4ed8;
+  --color-brand-500: #0b36d1;
+  --color-brand-600: #092bb0;
+
+  --color-good-400: #059669;
+  --color-good-500: #10b981;
+  --color-warn-400: #d97706;
+  --color-warn-500: #f59e0b;
+  --color-bad-400: #dc2626;
+  --color-bad-500: #ef4444;
+  --color-info-400: #7c3aed;
+
+  /* --- Tailwind palette shades used by status pills ---------------------- */
+  /* Light: deep, high-contrast text/solid values for a white background. */
+  --color-sky-300: #1d4ed8;
+  --color-sky-400: #1d4ed8;
+  --color-sky-500: #0b36d1;
+  --color-sky-600: #092bb0;
+
+  --color-emerald-300: #047857;
+  --color-emerald-400: #047857;
+  --color-emerald-500: #059669;
+  --color-emerald-600: #047857;
+
+  --color-amber-300: #b45309;
+  --color-amber-400: #b45309;
+  --color-amber-500: #d97706;
+  --color-amber-600: #b45309;
+
+  --color-red-300: #b91c1c;
+  --color-red-400: #dc2626;
+  --color-red-500: #dc2626;
+  --color-red-600: #b91c1c;
+
+  --color-violet-300: #6d28d9;
+  --color-violet-400: #6d28d9;
+  --color-violet-500: #7c3aed;
+  --color-violet-600: #6d28d9;
+
+  --color-slate-400: #64748b;
+  --color-slate-500: #475569;
+
+  --color-orange-500: #ea580c;
+  --color-rose-500: #e11d48;
+
+  --font-sans:
+    'Inter var', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    sans-serif;
+  --font-mono: ui-monospace, 'JetBrains Mono', 'Cascadia Code', Menlo, monospace;
+}
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --surface: #f8fafc;
+    --surface-raised: #ffffff;
+    --surface-sunken: #f1f5f9;
+    --border-subtle: #e2e8f0;
+    --text-strong: #0f172a;
+    --text-muted: #64748b;
+    /* Soft-shadowed, opaque card recipe — no frosted glass on light. */
+    --glass-fill: #ffffff;
+    --glass-fill-strong: #ffffff;
+    --glass-border: #e2e8f0;
+    --glass-blur: 0px;
+    --glass-shadow:
+      0 1px 2px rgb(15 23 42 / 0.04), 0 12px 32px -20px rgb(15 23 42 / 0.18);
+    --glass-sheen: none;
+    color-scheme: light;
+  }
+
+  .dark {
+    /* Restore the dark ink/mist/brand/accent ramps for the wall-display theme. */
+    --color-ink-950: #0b0f17;
+    --color-ink-900: #101725;
+    --color-ink-850: #141d2e;
+    --color-ink-800: #182234;
+    --color-ink-700: #1e293b;
+    --color-ink-600: #2a3a54;
+    --color-ink-500: #3d4f6d;
+
+    --color-mist-100: #eef2fb;
+    --color-mist-200: #d8e0f0;
+    --color-mist-300: #b3c0d8;
+    --color-mist-400: #8494b3;
+    --color-mist-500: #64748b;
+
+    --color-brand-300: #7dd3fc;
+    --color-brand-400: #38bdf8;
+    --color-brand-500: #0ea5e9;
+    --color-brand-600: #0284c7;
+
+    --color-good-400: #34d399;
+    --color-good-500: #10b981;
+    --color-warn-400: #fbbf24;
+    --color-warn-500: #f59e0b;
+    --color-bad-400: #f87171;
+    --color-bad-500: #ef4444;
+    --color-info-400: #a78bfa;
+
+    --color-sky-300: #7dd3fc;
+    --color-sky-400: #38bdf8;
+    --color-sky-500: #0ea5e9;
+    --color-sky-600: #0284c7;
+
+    --color-emerald-300: #6ee7b7;
+    --color-emerald-400: #34d399;
+    --color-emerald-500: #10b981;
+    --color-emerald-600: #059669;
+
+    --color-amber-300: #fcd34d;
+    --color-amber-400: #fbbf24;
+    --color-amber-500: #f59e0b;
+    --color-amber-600: #d97706;
+
+    --color-red-300: #fca5a5;
+    --color-red-400: #f87171;
+    --color-red-500: #ef4444;
+    --color-red-600: #dc2626;
+
+    --color-violet-300: #c4b5fd;
+    --color-violet-400: #a78bfa;
+    --color-violet-500: #8b5cf6;
+    --color-violet-600: #7c3aed;
+
+    --color-slate-400: #94a3b8;
+    --color-slate-500: #64748b;
+
+    --color-orange-500: #f97316;
+    --color-rose-500: #f43f5e;
+
+    --surface: var(--color-ink-950);
+    --surface-raised: var(--color-ink-900);
+    --surface-sunken: #080c14;
+    --border-subtle: var(--color-ink-700);
+    --text-strong: var(--color-mist-100);
+    --text-muted: var(--color-mist-400);
+    /* Translucent panels over the ambient aurora, not flat greys. */
+    --glass-fill: rgb(23 34 52 / 0.55);
+    --glass-fill-strong: rgb(23 34 52 / 0.78);
+    --glass-border: rgb(148 163 184 / 0.14);
+    --glass-blur: 18px;
+    --glass-shadow:
+      0 18px 40px -22px rgb(0 0 0 / 0.85), inset 0 1px 0 0 rgb(255 255 255 / 0.05);
+    --glass-sheen: linear-gradient(
+      160deg,
+      rgb(255 255 255 / 0.07) 0%,
+      rgb(255 255 255 / 0) 46%
+    );
+    color-scheme: dark;
+  }
+
+  /*
+   * Auth screens are intentionally light in both themes — a branded card with
+   * no dark variant. `login-light` pins the palette tokens the Login page
+   * references so it renders identically even when the persisted console theme
+   * is dark. Values here mirror the light defaults above.
+   */
+  .login-light {
+    --color-brand-300: #3b6bff;
+    --color-brand-400: #1d4ed8;
+    --color-brand-500: #0b36d1;
+    --color-brand-600: #092bb0;
+    --color-red-400: #dc2626;
+    --color-red-500: #dc2626;
+    --color-red-600: #b91c1c;
+    --color-slate-400: #64748b;
+    --color-slate-500: #475569;
+    color-scheme: light;
+  }
+
+  * {
+    border-color: var(--border-subtle);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  html {
+    /* Stop iOS Safari from inflating text when a phone is turned landscape. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  /* Kill the grey tap flash and the double-tap zoom delay for an app-like feel. */
+  a,
+  button,
+  [role='button'],
+  label,
+  summary {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+
+  body {
+    margin: 0;
+    background: var(--surface);
+    color: var(--text-strong);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Tabular figures everywhere numbers are compared in columns. */
+  table,
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::selection {
+    background: var(--color-brand-500);
+    color: #fff;
+  }
+
+  /* Scrollbars that do not fight the surface. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-ink-600) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: var(--color-ink-600);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--color-ink-500);
+    background-clip: content-box;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brand-400);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  /*
+   * Card: soft-shadowed white panel on light, translucent glass on dark. Both
+   * come from the same `--glass-*` variables so `.card` needs no theme branch.
+   */
+  .card {
+    position: relative;
+    background: var(--glass-fill);
+    background-image: var(--glass-sheen);
+    border: 1px solid var(--glass-border);
+    border-radius: 16px;
+    backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+    box-shadow: var(--glass-shadow);
+  }
+
+  /* Ambient colour wash behind the frosted panels. Dark theme only — the light
+   * SaaS surface is intentionally flat white. */
+  .aurora {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+
+  .dark .aurora {
+    display: block;
+  }
+
+  .aurora::before,
+  .aurora::after {
+    content: '';
+    position: absolute;
+    width: 46rem;
+    height: 46rem;
+    border-radius: 50%;
+    filter: blur(96px);
+  }
+
+  .aurora::before {
+    top: -18rem;
+    right: -12rem;
+    background: radial-gradient(circle, rgb(14 165 233 / 0.22), transparent 68%);
+  }
+
+  .aurora::after {
+    bottom: -22rem;
+    left: -14rem;
+    background: radial-gradient(circle, rgb(139 92 246 / 0.18), transparent 68%);
+  }
+
+  .glass-strong {
+    background: var(--glass-fill-strong);
+    background-image: var(--glass-sheen);
+    border: 1px solid var(--glass-border);
+    backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+    box-shadow: var(--glass-shadow);
+  }
+
+  .field {
+    width: 100%;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 0.5rem 0.7rem;
+    font-size: 0.875rem;
+    color: var(--text-strong);
+    transition:
+      border-color 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+
+  .field::placeholder {
+    color: var(--text-muted);
+    opacity: 0.75;
+  }
+
+  .field:focus {
+    outline: none;
+    border-color: var(--color-brand-500);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand-500) 18%, transparent);
+  }
+
+  .field:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .label {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 0.3rem;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    border-radius: 10px;
+    padding: 0.5rem 0.85rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease,
+      opacity 0.15s ease,
+      transform 0.05s ease;
+  }
+
+  .btn:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--color-brand-500);
+    color: #fff;
+    box-shadow: 0 6px 16px -8px color-mix(in srgb, var(--color-brand-500) 70%, transparent);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background: var(--color-brand-600);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border-subtle);
+    color: var(--text-strong);
+  }
+
+  .btn-ghost:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-strong) 7%, transparent);
+  }
+
+  .btn-danger {
+    background: transparent;
+    border: 1px solid color-mix(in srgb, var(--color-bad-500) 55%, transparent);
+    color: var(--color-bad-400);
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-bad-500) 16%, transparent);
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    border-radius: 9999px;
+    padding: 0.14rem 0.55rem;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+  }
+
+  .th {
+    text-align: left;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 0.6rem 0.75rem;
+    white-space: nowrap;
+  }
+
+  .td {
+    padding: 0.65rem 0.75rem;
+    font-size: 0.85rem;
+    vertical-align: middle;
+  }
+}
+
+/* Live pulse for the SSE indicator and freshly arrived scan rows. */
+@keyframes ts-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
+}
+
+.ts-pulse {
+  animation: ts-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes ts-flash {
+  from {
+    background-color: color-mix(in srgb, var(--color-brand-500) 22%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.ts-flash {
+  animation: ts-flash 1.5s ease-out;
+}
+
+/* Recharts renders its focus outline on every segment; drop it. */
+.recharts-wrapper:focus,
+.recharts-surface:focus {
+  outline: none;
+}

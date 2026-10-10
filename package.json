@@ -1,0 +1,26 @@
+{
+  "name": "transitsync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TransitSync — RFID campus shuttle fleet, RBAC and operations platform",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "install:all": "npm.cmd install --prefix server && npm.cmd install --prefix client",
+    "migrate": "npm.cmd run migrate --prefix server",
+    "seed": "npm.cmd run seed --prefix server",
+    "reset": "npm.cmd run reset --prefix server",
+    "dev:server": "npm.cmd run dev --prefix server",
+    "dev:client": "npm.cmd run dev --prefix client",
+    "build": "npm.cmd run build --prefix client",
+    "start": "npm.cmd run build && npm.cmd start --prefix server",
+    "serve": "npm.cmd start --prefix server",
+    "relay": "npm.cmd run relay --prefix server",
+    "test": "npm.cmd test --prefix server",
+    "dev": "concurrently -n API,WEB -c cyan,magenta \"npm:dev:server\" \"npm:dev:client\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

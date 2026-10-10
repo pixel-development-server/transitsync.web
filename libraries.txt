@@ -1,0 +1,3 @@
+# Wokwi Library Dependencies
+MFRC522
+LiquidCrystal

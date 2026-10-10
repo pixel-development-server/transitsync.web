@@ -1,0 +1,19 @@
+{
+  "name": "TransitSync — Shuttle Operations Console",
+  "short_name": "TransitSync",
+  "description": "RFID campus shuttle operations console for fleet, attendance, alerts and access control.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F8FAFC",
+  "theme_color": "#0B36D1",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
