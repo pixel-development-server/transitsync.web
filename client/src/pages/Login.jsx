@@ -109,6 +109,7 @@ export default function Login() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [forgotHint, setForgotHint] = useState(false);
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -169,6 +170,8 @@ export default function Login() {
     setStep('email');
     setError(null);
     setForgotHint(false);
+    setShowPassword(false);
+    setShowConfirmPassword(false);
     setPassword('');
     setConfirmPassword('');
   };
@@ -187,6 +190,7 @@ export default function Login() {
       const response = await api.post('/auth/check-email', { email: value });
       const status = response.data?.status;
 
+      // Defensive only: a server that answers 200 with a NOT_FOUND discriminator.
       if (status === 'NOT_FOUND') {
         setEmailError('No staff account found with this email address.');
         return;
@@ -199,7 +203,14 @@ export default function Login() {
       setSlide('right');
       setStep(status === 'FIRST_TIME_USER' ? 'setup' : 'password');
     } catch (caught) {
-      setEmailError(caught?.message || 'We could not verify that address. Please try again.');
+      // A 404 (no such account) or 403 (suspended) is an ordinary Step-1
+      // outcome, not a transport failure — surface the server's message inline.
+      const message = caught?.message || 'We could not verify that address. Please try again.';
+      if (caught?.code === 'ACCOUNT_SUSPENDED') {
+        setError({ message });
+      } else {
+        setEmailError(message);
+      }
     } finally {
       setChecking(false);
     }
@@ -432,11 +443,10 @@ export default function Login() {
                         disabled={checking}
                         aria-invalid={Boolean(emailError)}
                         required
-                        className={`${INPUT_CLASS} ${
-                          emailError
+                        className={`${INPUT_CLASS} ${emailError
                             ? 'border-red-300 bg-red-50/40 focus:border-red-500 focus:ring-red-500/20'
                             : ''
-                        }`}
+                          }`}
                       />
                       {emailError ? (
                         <p className="mt-1.5 flex items-center gap-1.5 text-[0.76rem] font-medium text-red-600">
@@ -489,8 +499,8 @@ export default function Login() {
                         >
                           <Icon name="shield" className="mt-px h-4 w-4 shrink-0 text-blue-600" />
                           <p>
-                            <span className="font-semibold">First-time setup:</span> please set up a
-                            strong password for your staff account.
+                            <span className="font-semibold">First-time setup:</span> Please create a
+                            secure password for your staff account.
                           </p>
                         </div>
 
@@ -529,18 +539,29 @@ export default function Login() {
                           <label htmlFor="setup-confirm" className={LABEL_CLASS}>
                             Confirm password
                           </label>
-                          <input
-                            id="setup-confirm"
-                            type={showPassword ? 'text' : 'password'}
-                            name="confirm-password"
-                            autoComplete="new-password"
-                            placeholder="Re-enter your password"
-                            value={confirmPassword}
-                            onChange={(event) => setConfirmPassword(event.target.value)}
-                            disabled={submitting}
-                            required
-                            className={INPUT_CLASS}
-                          />
+                          <div className="relative">
+                            <input
+                              id="setup-confirm"
+                              type={showConfirmPassword ? 'text' : 'password'}
+                              name="confirm-password"
+                              autoComplete="new-password"
+                              placeholder="Re-enter your password"
+                              value={confirmPassword}
+                              onChange={(event) => setConfirmPassword(event.target.value)}
+                              disabled={submitting}
+                              required
+                              className={`${INPUT_CLASS} pr-11`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowConfirmPassword((visible) => !visible)}
+                              className="absolute top-1/2 right-3 -translate-y-1/2 text-slate-400 transition hover:text-slate-600"
+                              aria-label={showConfirmPassword ? 'Hide password' : 'Show password'}
+                              tabIndex={-1}
+                            >
+                              <Icon name={showConfirmPassword ? 'eyeOff' : 'eye'} className="h-4 w-4" />
+                            </button>
+                          </div>
                           {confirmPassword && confirmPassword !== password ? (
                             <p className="mt-1.5 flex items-center gap-1.5 text-[0.76rem] font-medium text-red-600">
                               <Icon name="alert" className="h-3.5 w-3.5 shrink-0" />
@@ -644,7 +665,7 @@ export default function Login() {
 
           {/* Footer lives strictly inside the white (right) column. */}
           <div className="w-full px-6 pt-8 pb-4 text-center text-xs font-medium text-slate-400">
-            © 2026 TransitSync System — Itahari International College • Department of Transport
+            © 2026 TransitSync System • Department of Transport
             &amp; Resource Management. All rights reserved.
           </div>
         </section>

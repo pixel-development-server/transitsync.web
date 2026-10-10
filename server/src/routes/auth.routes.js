@@ -6,7 +6,7 @@ import { getDb } from '../db/connection.js';
 import { asyncHandler, validate } from '../lib/http.js';
 import { hashPassword, verifyPassword, checkPasswordPolicy, isPasswordSet } from '../lib/password.js';
 import { issueAccessToken, newSessionId, tokenExpiry } from '../lib/tokens.js';
-import { unauthorized, badRequest, conflict, accountLocked, unprocessable } from '../lib/errors.js';
+import AppError, { unauthorized, badRequest, conflict, accountLocked, unprocessable } from '../lib/errors.js';
 import { parseSqliteDate, parseDurationMs } from '../lib/time.js';
 import { requireAuth } from '../middleware/auth.js';
 import { loadUserForAuth, requiresPasswordChange } from '../services/permissions.js';
@@ -347,9 +347,20 @@ router.post(
 /**
  * Step 1 of the two-step sign-in.
  *
- * Public by design: the caller answers "does this account exist, and does it
- * already have a password?" before offering any credential. Rate-limited
- * because it would otherwise be a clean account-enumeration oracle.
+ * Public by design: the caller answers "does this account exist, does it still
+ * need a password, and is it locked out?" before offering any credential.
+ * Rate-limited because it would otherwise be a clean account-enumeration
+ * oracle.
+ *
+ * Response contract (mirrors the front-end's Step 1 handling):
+ *   404 { status: 'NOT_FOUND' }            — no such account
+ *   403 { status: 'ACCOUNT_SUSPENDED' }    — account exists but is suspended
+ *   200 { status: 'FIRST_TIME_USER' }      — no password yet; offer setup
+ *   200 { status: 'EXISTS_WITH_PASSWORD' } — offer the password field
+ *
+ * The reserved bootstrap/`invited` states are the only ones that resolve to
+ * FIRST_TIME_USER. A suspended account is rejected *before* the first-time
+ * check so a locked-out account can never reach the password-setup step.
  */
 router.post(
   '/check-email',
@@ -358,16 +369,39 @@ router.post(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const { email } = req.body;
-    const row = db.prepare('SELECT status, password_hash FROM users WHERE email = ?').get(email);
+    const ip = clientIp(req);
+    const row = db
+      .prepare('SELECT id, email, full_name, status, password_hash FROM users WHERE email = ?')
+      .get(email);
 
     if (!row) {
-      return res.json({ success: true, data: { status: 'NOT_FOUND', exists: false } });
+      throw new AppError(404, 'No staff account found with this email address.', { code: 'NOT_FOUND' });
     }
 
-    // A suspended account still has a password; the login step then reports the
-    // suspension. Only a genuinely passwordless invite is a first-time user.
-    const status = isPasswordSet(row.password_hash) ? 'EXISTS_WITH_PASSWORD' : 'FIRST_TIME_USER';
-    return res.json({ success: true, data: { status, exists: true } });
+    if (row.status === 'suspended') {
+      recordAudit({ userId: row.id, actorEmail: email, action: 'auth.check_email', ip, status: 'denied' });
+      throw new AppError(403, 'This account is suspended. Contact your System Administrator.', {
+        code: 'ACCOUNT_SUSPENDED',
+      });
+    }
+
+    // Note: an account carrying a one-time *temporary* password (with
+    // `force_password_reset`) is intentionally NOT a first-time user. It already
+    // holds a credential, so its holder signs in with it and is rotated to their
+    // own password afterwards — that keeps a known email alone insufficient to
+    // claim the account.
+    const firstTime = !isPasswordSet(row.password_hash) || row.status === 'invited';
+
+    return res.json({
+      success: true,
+      data: {
+        status: firstTime ? 'FIRST_TIME_USER' : 'EXISTS_WITH_PASSWORD',
+        exists: true,
+        email: row.email,
+        name: row.full_name,
+        message: firstTime ? 'First-time setup required.' : undefined,
+      },
+    });
   }),
 );
 

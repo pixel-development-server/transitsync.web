@@ -725,12 +725,13 @@ test('a blank temporary password creates a passwordless invited account', async 
   assert.equal(session.mustChangePassword, false);
 });
 
-test('check-email reports NOT_FOUND and accepts a simple temporary password', async () => {
+test('check-email reports NOT_FOUND (404) and accepts a simple temporary password', async () => {
   const missing = await call(ctx, 'POST', '/api/auth/check-email', {
     body: { email: `nobody-${Date.now()}@transitsync.edu.np` },
   });
-  assert.equal(missing.status, 200);
-  assert.equal(missing.body.data.status, 'NOT_FOUND');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.error.code, 'NOT_FOUND');
+  assert.equal(missing.body.error.message, 'No staff account found with this email address.');
 
   const email = `simple-${Date.now()}@transitsync.edu.np`;
   const simple = await call(ctx, 'POST', '/api/users', {
@@ -751,6 +752,46 @@ test('check-email reports NOT_FOUND and accepts a simple temporary password', as
 
   const session = await login(ctx, email, 'abc');
   assert.equal(session.mustChangePassword, true);
+});
+
+test('check-email reports a suspended account as 403 without leaking the password state', async () => {
+  const email = `suspended-${Date.now()}@transitsync.edu.np`;
+  const created = await call(ctx, 'POST', '/api/users', {
+    token: admin.token,
+    body: {
+      email,
+      fullName: 'Suspended Staff',
+      roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
+      temporaryPassword: 'Kestrel!2026',
+      forcePasswordChange: true,
+    },
+  });
+  assert.equal(created.status, 201);
+
+  const suspended = await call(ctx, 'PATCH', `/api/users/${created.body.data.user.id}`, {
+    token: admin.token,
+    body: { status: 'suspended' },
+  });
+  assert.equal(suspended.status, 200);
+
+  const probe = await call(ctx, 'POST', '/api/auth/check-email', { body: { email } });
+  assert.equal(probe.status, 403);
+  assert.equal(probe.body.error.code, 'ACCOUNT_SUSPENDED');
+
+  // A suspended invite cannot be claimed, even though it never had a password.
+  const inviteEmail = `suspended-invite-${Date.now()}@transitsync.edu.np`;
+  const invite = await call(ctx, 'POST', '/api/users', {
+    token: admin.token,
+    body: { email: inviteEmail, fullName: 'Suspended Invite', roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT) },
+  });
+  assert.equal(invite.body.data.user.status, 'invited');
+  await call(ctx, 'PATCH', `/api/users/${invite.body.data.user.id}`, {
+    token: admin.token,
+    body: { status: 'suspended' },
+  });
+  const inviteProbe = await call(ctx, 'POST', '/api/auth/check-email', { body: { email: inviteEmail } });
+  assert.equal(inviteProbe.status, 403);
+  assert.equal(inviteProbe.body.error.code, 'ACCOUNT_SUSPENDED');
 });
 
 test('admin-issued password reset invalidates the old credential', async () => {
