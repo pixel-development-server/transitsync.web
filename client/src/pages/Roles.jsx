@@ -6,6 +6,7 @@ import { Checkbox, FormError } from '../components/form.jsx';
 import { api } from '../lib/api.js';
 import { useApi } from '../lib/hooks.js';
 import { useToast } from '../lib/toast.jsx';
+import { modulePermissionKeys } from '../lib/permissions.js';
 
 /**
  * Role-level permission editing.
@@ -34,7 +35,7 @@ function RolePermissionsDialog({ open, onClose, onSaved, role, modules, allPermi
     );
 
   const toggleModule = (module) => {
-    const keys = module.permissions ?? [];
+    const keys = modulePermissionKeys(module);
     const allOn = keys.length > 0 && keys.every((key) => selected.includes(key));
     setSelected((current) =>
       allOn ? current.filter((key) => !keys.includes(key)) : [...new Set([...current, ...keys])],
@@ -110,7 +111,7 @@ function RolePermissionsDialog({ open, onClose, onSaved, role, modules, allPermi
 
         <div className="space-y-2">
           {modules.map((module) => {
-            const keys = module.permissions ?? [];
+            const keys = modulePermissionKeys(module);
             const count = keys.filter((key) => selected.includes(key)).length;
             const allOn = keys.length > 0 && count === keys.length;
 
@@ -295,7 +296,7 @@ export default function Roles() {
                     {module.label}
                   </h3>
                   <ul className="space-y-1.5">
-                    {(module.permissions ?? []).map((permission) => {
+                    {modulePermissionKeys(module).map((permission) => {
                       const count = byModule.get(permission) ?? 0;
                       return (
                         <li key={permission} className="flex items-center justify-between gap-3">

@@ -29,6 +29,7 @@ import { useAuth } from '../lib/auth.jsx';
 import { copyText, useApi, useDebounced, usePagination } from '../lib/hooks.js';
 import { useToast } from '../lib/toast.jsx';
 import { formatDateTime, formatRelative, initials, titleCase } from '../lib/format.js';
+import { modulePermissionKeys } from '../lib/permissions.js';
 
 const EMPTY_USER = {
   email: '',
@@ -84,7 +85,7 @@ function PermissionsDialog({ open, onClose, onSaved, user, roles, permissionMatr
     );
 
   const toggleModule = (module) => {
-    const keys = module.permissions ?? [];
+    const keys = modulePermissionKeys(module);
     const allOn = keys.every((key) => selected.includes(key));
     setSelected((current) =>
       allOn
@@ -166,7 +167,7 @@ function PermissionsDialog({ open, onClose, onSaved, user, roles, permissionMatr
 
             <div className="space-y-2">
               {modules.map((module) => {
-                const keys = module.permissions ?? [];
+                const keys = modulePermissionKeys(module);
                 const count = keys.filter((key) => selected.includes(key)).length;
                 const allOn = keys.length > 0 && count === keys.length;
 
