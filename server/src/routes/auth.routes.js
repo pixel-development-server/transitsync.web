@@ -4,7 +4,7 @@ import rateLimit from 'express-rate-limit';
 import config from '../config/env.js';
 import { getDb } from '../db/connection.js';
 import { asyncHandler, validate } from '../lib/http.js';
-import { hashPassword, verifyPassword, checkPasswordPolicy } from '../lib/password.js';
+import { hashPassword, verifyPassword, checkPasswordPolicy, isPasswordSet } from '../lib/password.js';
 import { issueAccessToken, newSessionId, tokenExpiry } from '../lib/tokens.js';
 import { unauthorized, badRequest, conflict, accountLocked, unprocessable } from '../lib/errors.js';
 import { parseSqliteDate, parseDurationMs } from '../lib/time.js';
@@ -14,6 +14,8 @@ import { recordAudit, clientIp } from '../services/audit.js';
 import { ROLE_KEYS } from '../db/permissions.js';
 import {
   loginSchema,
+  checkEmailSchema,
+  setFirstPasswordSchema,
   setupSchema,
   changePasswordSchema,
   updateProfileSchema,
@@ -38,6 +40,24 @@ const loginLimiter = rateLimit({
   message: {
     success: false,
     error: { code: 'RATE_LIMITED', message: 'Too many sign-in attempts. Try again in a few minutes.' },
+  },
+});
+
+/**
+ * Protection for the account-probe endpoints behind the two-step sign-in.
+ *
+ * Unlike `loginLimiter` this counts successes too, because a *successful*
+ * `check-email` is precisely the account-enumeration signal we are throttling.
+ */
+const probeLimiter = rateLimit({
+  windowMs: config.limits.loginWindowMs,
+  max: config.limits.probeMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => config.isTest,
+  message: {
+    success: false,
+    error: { code: 'RATE_LIMITED', message: 'Too many attempts. Please wait a few minutes and try again.' },
   },
 });
 
@@ -319,6 +339,114 @@ router.post(
         sessionId: session.sessionId,
         mustChangePassword: requiresPasswordChange(principal),
         user: publicUser(principal),
+      },
+    });
+  }),
+);
+
+/**
+ * Step 1 of the two-step sign-in.
+ *
+ * Public by design: the caller answers "does this account exist, and does it
+ * already have a password?" before offering any credential. Rate-limited
+ * because it would otherwise be a clean account-enumeration oracle.
+ */
+router.post(
+  '/check-email',
+  probeLimiter,
+  validate(checkEmailSchema),
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    const { email } = req.body;
+    const row = db.prepare('SELECT status, password_hash FROM users WHERE email = ?').get(email);
+
+    if (!row) {
+      return res.json({ success: true, data: { status: 'NOT_FOUND', exists: false } });
+    }
+
+    // A suspended account still has a password; the login step then reports the
+    // suspension. Only a genuinely passwordless invite is a first-time user.
+    const status = isPasswordSet(row.password_hash) ? 'EXISTS_WITH_PASSWORD' : 'FIRST_TIME_USER';
+    return res.json({ success: true, data: { status, exists: true } });
+  }),
+);
+
+/**
+ * Step 2b of the two-step sign-in: an administrator created the account but its
+ * owner has never chosen a password, so this is the "claim" step.
+ *
+ * Security posture: unreachable for any account that already holds a password
+ * or is suspended, rate-limited through `probeLimiter`, and audited. It still
+ * rests on knowing a valid staff email — the residual risk of a passwordless
+ * invite with no email channel — so the account is deliberately created in the
+ * `invited` state and can only be claimed until it is activated.
+ */
+router.post(
+  '/set-first-password',
+  probeLimiter,
+  validate(setFirstPasswordSchema),
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    const { email, password } = req.body;
+    const ip = clientIp(req);
+
+    const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    if (!row) {
+      recordAudit({ actorEmail: email, action: 'auth.first_password_set', ip, status: 'failure' });
+      throw badRequest('This invitation is no longer valid. Ask your administrator to resend it.');
+    }
+    if (row.status === 'suspended') {
+      throw unauthorized('This account has been suspended. Contact your System Administrator.', 'ACCOUNT_INACTIVE');
+    }
+    if (isPasswordSet(row.password_hash)) {
+      throw conflict('This account already has a password. Sign in instead.');
+    }
+
+    const policy = checkPasswordPolicy(password, { email: row.email, fullName: row.full_name });
+    if (!policy.valid) {
+      throw unprocessable(
+        'Password does not meet the policy.',
+        policy.errors.map((message) => ({ field: 'password', message })),
+      );
+    }
+
+    const passwordHash = await hashPassword(password);
+    db.prepare(
+      `UPDATE users SET
+         password_hash        = ?,
+         status               = 'active',
+         is_first_login       = 0,
+         password_changed     = 1,
+         force_password_reset = 0,
+         last_password_change = datetime('now'),
+         failed_login_count   = 0,
+         locked_until         = NULL,
+         token_version        = token_version + 1,
+         updated_at           = datetime('now')
+       WHERE id = ?`,
+    ).run(passwordHash, row.id);
+
+    recordAudit({
+      userId: row.id,
+      actorEmail: email,
+      action: 'auth.first_password_set',
+      entity: 'user',
+      entityId: row.id,
+      ip,
+    });
+
+    const user = loadUserForAuth(db, row.id);
+    const session = createSession(db, user, req, { remember: false });
+    setAuthCookie(req, res, session.token, session.expiresAt);
+
+    res.status(201).json({
+      success: true,
+      data: {
+        token: session.token,
+        expiresAt: session.expiresAt,
+        sessionId: session.sessionId,
+        mustChangePassword: false,
+        user: publicUser(user),
       },
     });
   }),

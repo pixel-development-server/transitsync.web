@@ -511,6 +511,45 @@
   animation: ts-flash 1.5s ease-out;
 }
 
+/* Two-step sign-in: the credential panel slides in as the email step gives way.
+   Direction encodes forwards/backwards through the flow. */
+@keyframes ts-slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(26px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.ts-slide-in-right {
+  animation: ts-slide-in-right 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes ts-slide-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-26px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.ts-slide-in-left {
+  animation: ts-slide-in-left 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ts-slide-in-right,
+  .ts-slide-in-left {
+    animation: none;
+  }
+}
+
 /* Recharts renders its focus outline on every segment; drop it. */
 .recharts-wrapper:focus,
 .recharts-surface:focus {

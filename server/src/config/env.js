@@ -112,6 +112,9 @@ export const config = {
     bodyLimit: process.env.BODY_LIMIT || '1mb',
     apiRateMax: toInt(process.env.API_RATE_LIMIT_MAX, 600),
     apiRateWindowMs: toInt(process.env.API_RATE_LIMIT_WINDOW_MS, 60 * 1000),
+    // Account-probe budget for the two-step sign-in (check-email +
+    // set-first-password), counted per IP including successes.
+    probeMax: toInt(process.env.AUTH_PROBE_RATE_LIMIT_MAX, 30),
   },
 
   /**

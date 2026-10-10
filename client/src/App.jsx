@@ -22,6 +22,7 @@ import {
 
 import Layout from './components/Layout.jsx';
 import { Icon } from './components/Icon.jsx';
+import SessionTimeout from './components/SessionTimeout.jsx';
 import { EmptyState, Spinner } from './components/ui.jsx';
 import { AuthProvider, useAuth } from './lib/auth.jsx';
 import { useApi } from './lib/hooks.js';
@@ -141,17 +142,6 @@ function SetupGate({ children }) {
   return children;
 }
 
-function NotFound() {
-  return (
-    <EmptyState
-      icon="search"
-      title="Page not found"
-      message="That route does not exist in the TransitSync console."
-      className="min-h-[60vh]"
-    />
-  );
-}
-
 function Shell() {
   const { mustChangePassword } = useAuth();
 
@@ -245,7 +235,9 @@ function AppRoutes() {
             />
             <Route path="profile" element={<Profile />} />
 
-            <Route path="*" element={<NotFound />} />
+            {/* Unknown paths fall back to the Dashboard instead of a dead-end
+                "Page not found", so stale bookmarks and typos still show the app. */}
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Route>
       </Route>
@@ -258,6 +250,7 @@ export default function App() {
     <BrowserRouter>
       <ToastProvider>
         <AuthProvider>
+          <SessionTimeout />
           <SetupGate>
             <AppRoutes />
           </SetupGate>

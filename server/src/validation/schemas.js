@@ -24,6 +24,23 @@ export const loginSchema = z.object({
   remember: z.boolean().optional().default(false),
 });
 
+/** Step 1 of the two-step sign-in: is this a real account, and does it have a password? */
+export const checkEmailSchema = z.object({
+  email: z.string().trim().toLowerCase().email('Enter a valid email address'),
+});
+
+/** Step 2b: the owner of an invited, passwordless account chooses their password. */
+export const setFirstPasswordSchema = z
+  .object({
+    email: z.string().trim().toLowerCase().email('Enter a valid email address'),
+    password: z.string().min(1, 'Password is required'),
+    confirmPassword: z.string(),
+  })
+  .refine((data) => data.password === data.confirmPassword, {
+    message: 'Passwords do not match',
+    path: ['confirmPassword'],
+  });
+
 export const setupSchema = z.object({
   email: z.string().trim().toLowerCase().email('Enter a valid email address'),
   password: z.string().min(10, 'Use at least 10 characters'),
@@ -66,7 +83,10 @@ export const createUserSchema = z.object({
   jobTitle: optionalText(120),
   department: optionalText(120),
   phone: optionalText(40),
-  temporaryPassword: z.string().min(10, 'Temporary password must be at least 10 characters').optional(),
+  // Deliberately unconstrained: a temporary password is a single-use handover
+  // credential, not the user's own password, so the complexity policy does not
+  // apply. Only a sane upper bound is enforced.
+  temporaryPassword: z.string().trim().max(128).optional(),
   permissionsMode: z.enum(['INHERIT', 'CUSTOM']).optional().default('INHERIT'),
   permissions: z.array(z.string()).optional().default([]),
   forcePasswordChange: z.boolean().optional().default(true),
@@ -331,6 +351,8 @@ export const backupFileSchema = z.object({ file: z.string().regex(/^[\w.-]+$/, '
 
 export const schemas = {
   loginSchema,
+  checkEmailSchema,
+  setFirstPasswordSchema,
   setupSchema,
   changePasswordSchema,
   updateProfileSchema,

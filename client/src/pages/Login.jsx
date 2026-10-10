@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 
 import { Icon } from '../components/Icon.jsx';
 import { Spinner } from '../components/ui.jsx';
+import { api } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
 import { useApi } from '../lib/hooks.js';
+import { useToast } from '../lib/toast.jsx';
 
 /** Value props shown on the branded side panel. */
 const FEATURES = [
@@ -21,10 +23,13 @@ const FEATURES = [
 const TAB_PATH =
   'M100 0 A14 14 0 0 1 86 14 L34 14 A22 22 0 0 0 12 36 A22 22 0 0 0 34 58 L86 58 A14 14 0 0 1 100 72 Z';
 
+/** Deliberately loose, client-side format gate; the server validates authoritatively. */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 /** Redaction rules mirroring the server's password policy endpoint. */
-function PasswordRules({ value }) {
+function PasswordRules({ value, minLength = 10 }) {
   const rules = [
-    { label: 'At least 10 characters', ok: value.length >= 10 },
+    { label: `At least ${minLength} characters`, ok: value.length >= minLength },
     { label: 'An uppercase letter', ok: /[A-Z]/.test(value) },
     { label: 'A lowercase letter', ok: /[a-z]/.test(value) },
     { label: 'A number', ok: /\d/.test(value) },
@@ -64,10 +69,26 @@ const INPUT_CLASS =
 
 const LABEL_CLASS = 'mb-1.5 block text-xs font-semibold tracking-wider text-slate-500 uppercase';
 
+const SUBMIT_CLASS =
+  'mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-blue-600 px-6 py-3.5 text-sm font-bold text-white shadow-lg shadow-blue-600/30 transition-all hover:bg-blue-700 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60';
+
+/**
+ * Two-step sign-in.
+ *
+ * Step 1 collects the email and asks `/auth/check-email` whether the account
+ * exists and already has a password. Step 2 then morphs in place: a normal
+ * password form for an established account, or a "create your password" form
+ * for an invited account that has never had one.
+ */
 export default function Login() {
-  const { signIn, isAuthenticated, mustChangePassword, loading } = useAuth();
+  const { signIn, establishSession, isAuthenticated, mustChangePassword, loading } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+  const toast = useToast();
+
+  const [step, setStep] = useState('email'); // 'email' | 'password' | 'setup'
+  // Entrance direction for the animated step swap: forward slides from the right.
+  const [slide, setSlide] = useState('right');
 
   // The setup wizard stashes the email it just created in sessionStorage; read
   // it once and clear it so returning visitors get a blank field.
@@ -81,19 +102,53 @@ export default function Login() {
       return '';
     }
   });
+  const [emailError, setEmailError] = useState(null);
+  const [checking, setChecking] = useState(false);
+
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [forgotHint, setForgotHint] = useState(false);
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+
+  const emailRef = useRef(null);
+  const passwordRef = useRef(null);
 
   const { data: setup } = useApi('/auth/setup-status');
   const institutionName = setup?.institutionName || 'Itahari International College';
+  const minLength = setup?.passwordPolicy?.minLength ?? 10;
 
   useEffect(() => {
     document.title = `Sign in · ${institutionName}`;
   }, [institutionName]);
+
+  // Announce an inactivity sign-out exactly once, then strip the flag so a
+  // refresh does not repeat it.
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get('reason') !== 'timeout') return;
+    setTimedOut(true);
+    toast.warning('Session expired due to 3 minutes of inactivity. Please sign in again.', {
+      title: 'Signed out',
+    });
+    params.delete('reason');
+    const query = params.toString();
+    navigate(`${location.pathname}${query ? `?${query}` : ''}`, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search]);
+
+  // Move focus into the credential field once Step 2 has settled.
+  useEffect(() => {
+    if (step === 'email') {
+      emailRef.current?.focus();
+      return undefined;
+    }
+    const timer = setTimeout(() => passwordRef.current?.focus(), 340);
+    return () => clearTimeout(timer);
+  }, [step]);
 
   if (loading) {
     return (
@@ -109,20 +164,89 @@ export default function Login() {
     return <Navigate to={target} replace />;
   }
 
-  const onSubmit = async (event) => {
+  const goToEmail = () => {
+    setSlide('left');
+    setStep('email');
+    setError(null);
+    setForgotHint(false);
+    setPassword('');
+    setConfirmPassword('');
+  };
+
+  const onCheckEmail = async (event) => {
     event.preventDefault();
+    setEmailError(null);
     setError(null);
 
-    if (!email.trim()) return setError({ message: 'Enter your email address.' });
+    const value = email.trim().toLowerCase();
+    if (!value) return setEmailError('Enter your email address.');
+    if (!EMAIL_RE.test(value)) return setEmailError('Enter a valid email address.');
+
+    setChecking(true);
+    try {
+      const response = await api.post('/auth/check-email', { email: value });
+      const status = response.data?.status;
+
+      if (status === 'NOT_FOUND') {
+        setEmailError('No staff account found with this email address.');
+        return;
+      }
+
+      setEmail(value);
+      setPassword('');
+      setConfirmPassword('');
+      setError(null);
+      setSlide('right');
+      setStep(status === 'FIRST_TIME_USER' ? 'setup' : 'password');
+    } catch (caught) {
+      setEmailError(caught?.message || 'We could not verify that address. Please try again.');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const onSignIn = async (event) => {
+    event.preventDefault();
+    setError(null);
     if (!password) return setError({ message: 'Enter your password.' });
 
     setSubmitting(true);
     try {
-      await signIn(email.trim().toLowerCase(), password, rememberMe);
+      await signIn(email, password, rememberMe);
       navigate('/', { replace: true });
     } catch (caught) {
       setError(caught);
       setPassword('');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const onCreatePassword = async (event) => {
+    event.preventDefault();
+    setError(null);
+
+    if (password.length < minLength) {
+      return setError({
+        message: `Use at least ${minLength} characters.`,
+        details: [{ field: 'password', message: `Use at least ${minLength} characters.` }],
+      });
+    }
+    if (password !== confirmPassword) {
+      return setError({
+        message: 'Passwords do not match.',
+        details: [{ field: 'confirmPassword', message: 'Passwords do not match.' }],
+      });
+    }
+
+    setSubmitting(true);
+    try {
+      const response = await api.post('/auth/set-first-password', { email, password, confirmPassword });
+      await establishSession(response.data);
+      toast.success('Your password is set. Welcome aboard.', { title: 'Account activated' });
+      navigate('/', { replace: true });
+    } catch (caught) {
+      setError(caught);
     } finally {
       setSubmitting(false);
     }
@@ -214,140 +338,307 @@ export default function Login() {
           <div className="flex flex-1 items-center justify-center px-8 md:px-20">
             <div className="w-full max-w-md">
               <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border border-slate-100 bg-white text-blue-700 shadow-md">
-                <Icon name="user" className="h-7 w-7" strokeWidth={2} />
+                <Icon
+                  name={step === 'email' ? 'user' : step === 'setup' ? 'key' : 'lock'}
+                  className="h-7 w-7"
+                  strokeWidth={2}
+                />
               </div>
 
               <h1 className="mt-5 text-center text-3xl font-extrabold tracking-tight text-slate-900">
-                Login
+                {step === 'email' ? 'Login' : step === 'setup' ? 'Set your password' : 'Welcome back'}
               </h1>
               <p className="mt-1 mb-6 text-center text-sm text-slate-500">
-                Sign in to the {institutionName} shuttle operations console.
+                {step === 'email'
+                  ? `Sign in to the ${institutionName} shuttle operations console.`
+                  : step === 'setup'
+                    ? 'First time here? Create the password you will use from now on.'
+                    : `Enter your password to continue to ${institutionName}.`}
               </p>
 
-              <form onSubmit={onSubmit} className="space-y-4" noValidate>
-                {error ? (
-                  <div
-                    role="alert"
-                    className="flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-[0.8rem] text-red-700"
-                  >
-                    <Icon name="alert" className="mt-px h-4 w-4 shrink-0 text-red-500" />
-                    <div className="min-w-0 flex-1">
-                      <p className="font-semibold">{error.message || 'Sign-in failed.'}</p>
-                      {Array.isArray(error.details) && error.details.length ? (
-                        <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[0.73rem] text-red-600">
-                          {error.details.slice(0, 6).map((detail, index) => (
-                            <li key={index}>
-                              {detail.field ? (
-                                <span className="font-medium">{detail.field}: </span>
-                              ) : null}
-                              {detail.message}
-                            </li>
-                          ))}
-                        </ul>
-                      ) : null}
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setError(null)}
-                      className="shrink-0 text-red-400 transition hover:text-red-600"
-                      aria-label="Dismiss error"
-                    >
-                      <Icon name="close" className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                ) : null}
-
-                <div>
-                  <label htmlFor="login-email" className={LABEL_CLASS}>
-                    Email address
-                  </label>
-                  <input
-                    id="login-email"
-                    type="email"
-                    name="email"
-                    autoComplete="username"
-                    placeholder="you@transitsync.edu.np"
-                    value={email}
-                    onChange={(event) => setEmail(event.target.value)}
-                    disabled={submitting}
-                    required
-                    className={INPUT_CLASS}
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="login-password" className={LABEL_CLASS}>
-                    Password
-                  </label>
-                  <div className="relative">
-                    <input
-                      id="login-password"
-                      type={showPassword ? 'text' : 'password'}
-                      name="password"
-                      autoComplete="current-password"
-                      placeholder="••••••••••"
-                      value={password}
-                      onChange={(event) => setPassword(event.target.value)}
-                      disabled={submitting}
-                      required
-                      className={`${INPUT_CLASS} pr-11`}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword((visible) => !visible)}
-                      className="absolute top-1/2 right-3 -translate-y-1/2 text-slate-400 transition hover:text-slate-600"
-                      aria-label={showPassword ? 'Hide password' : 'Show password'}
-                      tabIndex={-1}
-                    >
-                      <Icon name={showPassword ? 'eyeOff' : 'eye'} className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
-                  <label className="flex cursor-pointer items-center gap-2 text-[0.8rem] text-slate-600">
-                    <input
-                      type="checkbox"
-                      checked={rememberMe}
-                      onChange={(event) => setRememberMe(event.target.checked)}
-                      disabled={submitting}
-                      className="h-4 w-4 rounded border-slate-300 accent-blue-600 focus:ring-blue-500/30"
-                    />
-                    Keep me signed in
-                  </label>
+              {timedOut ? (
+                <div
+                  role="status"
+                  className="mb-4 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[0.8rem] text-amber-800"
+                >
+                  <Icon name="alert" className="mt-px h-4 w-4 shrink-0 text-amber-500" />
+                  <p className="min-w-0 flex-1">
+                    Session expired due to 3 minutes of inactivity. Please sign in again.
+                  </p>
                   <button
                     type="button"
-                    onClick={() => setForgotHint((visible) => !visible)}
-                    className="text-sm font-medium text-blue-600 hover:underline"
+                    onClick={() => setTimedOut(false)}
+                    className="shrink-0 text-amber-400 transition hover:text-amber-600"
+                    aria-label="Dismiss notice"
                   >
-                    Forgot Password?
+                    <Icon name="close" className="h-3.5 w-3.5" />
                   </button>
                 </div>
+              ) : null}
 
-                {forgotHint ? (
-                  <p className="rounded-lg bg-slate-50 px-3 py-2 text-[0.72rem] leading-relaxed text-slate-500 ring-1 ring-slate-900/5">
-                    Password resets are handled by your transport administrator. Contact the
-                    Department of Transport &amp; Resource Management.
-                  </p>
-                ) : null}
-
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className="mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-blue-600 px-6 py-3.5 text-sm font-bold text-white shadow-lg shadow-blue-600/30 transition-all hover:bg-blue-700 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
+              {error ? (
+                <div
+                  role="alert"
+                  className="mb-4 flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-[0.8rem] text-red-700"
                 >
-                  {submitting ? (
-                    <Spinner className="h-4 w-4" />
-                  ) : (
-                    <Icon name="logout" className="h-4 w-4" />
-                  )}
-                  <span>{submitting ? 'Signing in…' : 'Sign in'}</span>
-                </button>
+                  <Icon name="alert" className="mt-px h-4 w-4 shrink-0 text-red-500" />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-semibold">{error.message || 'Sign-in failed.'}</p>
+                    {Array.isArray(error.details) && error.details.length ? (
+                      <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[0.73rem] text-red-600">
+                        {error.details.slice(0, 6).map((detail, index) => (
+                          <li key={index}>
+                            {detail.field ? (
+                              <span className="font-medium">{detail.field}: </span>
+                            ) : null}
+                            {detail.message}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setError(null)}
+                    className="shrink-0 text-red-400 transition hover:text-red-600"
+                    aria-label="Dismiss error"
+                  >
+                    <Icon name="close" className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ) : null}
 
-                <p className="mt-3 text-center text-xs text-slate-400">
-                  Authorised staff only. All access is logged and audited under system policy.
-                </p>
-              </form>
+              {/* The step panel is keyed so each transition remounts it and replays
+                  the slide animation in the correct direction. */}
+              <div key={step} className={step === 'email' ? 'ts-slide-in-left' : `ts-slide-in-${slide}`}>
+                {step === 'email' ? (
+                  <form onSubmit={onCheckEmail} className="space-y-4" noValidate>
+                    <div>
+                      <label htmlFor="login-email" className={LABEL_CLASS}>
+                        Email address
+                      </label>
+                      <input
+                        id="login-email"
+                        ref={emailRef}
+                        type="email"
+                        name="email"
+                        autoComplete="username"
+                        placeholder="you@transitsync.edu.np"
+                        value={email}
+                        onChange={(event) => {
+                          setEmail(event.target.value);
+                          if (emailError) setEmailError(null);
+                        }}
+                        disabled={checking}
+                        aria-invalid={Boolean(emailError)}
+                        required
+                        className={`${INPUT_CLASS} ${
+                          emailError
+                            ? 'border-red-300 bg-red-50/40 focus:border-red-500 focus:ring-red-500/20'
+                            : ''
+                        }`}
+                      />
+                      {emailError ? (
+                        <p className="mt-1.5 flex items-center gap-1.5 text-[0.76rem] font-medium text-red-600">
+                          <Icon name="alert" className="h-3.5 w-3.5 shrink-0" />
+                          {emailError}
+                        </p>
+                      ) : null}
+                    </div>
+
+                    <button type="submit" disabled={checking} className={SUBMIT_CLASS}>
+                      {checking ? (
+                        <Spinner className="h-4 w-4" />
+                      ) : (
+                        <Icon name="arrowRight" className="h-4 w-4" />
+                      )}
+                      <span>{checking ? 'Checking…' : 'Continue'}</span>
+                    </button>
+                  </form>
+                ) : (
+                  <div className="space-y-4">
+                    {/* Back to email — shows the address that was verified. */}
+                    <button
+                      type="button"
+                      onClick={goToEmail}
+                      className="group flex w-full items-center gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-left transition hover:border-blue-300 hover:bg-blue-50"
+                    >
+                      <Icon
+                        name="arrowLeft"
+                        className="h-4 w-4 shrink-0 text-slate-400 transition group-hover:text-blue-600"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[0.62rem] font-semibold tracking-[0.12em] text-slate-400 uppercase">
+                          Signing in as
+                        </span>
+                        <span className="block truncate text-[0.85rem] font-semibold text-slate-700">
+                          {email}
+                        </span>
+                      </span>
+                      <span className="flex shrink-0 items-center gap-1 text-[0.72rem] font-semibold text-slate-400 transition group-hover:text-blue-600">
+                        <Icon name="edit" className="h-3.5 w-3.5" />
+                        Edit
+                      </span>
+                    </button>
+
+                    {step === 'setup' ? (
+                      <form onSubmit={onCreatePassword} className="space-y-4" noValidate>
+                        <div
+                          role="status"
+                          className="flex items-start gap-2.5 rounded-xl border border-blue-200 bg-blue-50 px-3.5 py-2.5 text-[0.78rem] text-blue-800"
+                        >
+                          <Icon name="shield" className="mt-px h-4 w-4 shrink-0 text-blue-600" />
+                          <p>
+                            <span className="font-semibold">First-time setup:</span> please set up a
+                            strong password for your staff account.
+                          </p>
+                        </div>
+
+                        <div>
+                          <label htmlFor="setup-password" className={LABEL_CLASS}>
+                            New password
+                          </label>
+                          <div className="relative">
+                            <input
+                              id="setup-password"
+                              ref={passwordRef}
+                              type={showPassword ? 'text' : 'password'}
+                              name="new-password"
+                              autoComplete="new-password"
+                              placeholder="Create a strong password"
+                              value={password}
+                              onChange={(event) => setPassword(event.target.value)}
+                              disabled={submitting}
+                              required
+                              className={`${INPUT_CLASS} pr-11`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowPassword((visible) => !visible)}
+                              className="absolute top-1/2 right-3 -translate-y-1/2 text-slate-400 transition hover:text-slate-600"
+                              aria-label={showPassword ? 'Hide password' : 'Show password'}
+                              tabIndex={-1}
+                            >
+                              <Icon name={showPassword ? 'eyeOff' : 'eye'} className="h-4 w-4" />
+                            </button>
+                          </div>
+                          <PasswordRules value={password} minLength={minLength} />
+                        </div>
+
+                        <div>
+                          <label htmlFor="setup-confirm" className={LABEL_CLASS}>
+                            Confirm password
+                          </label>
+                          <input
+                            id="setup-confirm"
+                            type={showPassword ? 'text' : 'password'}
+                            name="confirm-password"
+                            autoComplete="new-password"
+                            placeholder="Re-enter your password"
+                            value={confirmPassword}
+                            onChange={(event) => setConfirmPassword(event.target.value)}
+                            disabled={submitting}
+                            required
+                            className={INPUT_CLASS}
+                          />
+                          {confirmPassword && confirmPassword !== password ? (
+                            <p className="mt-1.5 flex items-center gap-1.5 text-[0.76rem] font-medium text-red-600">
+                              <Icon name="alert" className="h-3.5 w-3.5 shrink-0" />
+                              Passwords do not match.
+                            </p>
+                          ) : confirmPassword && confirmPassword === password ? (
+                            <p className="mt-1.5 flex items-center gap-1.5 text-[0.76rem] font-medium text-emerald-600">
+                              <Icon name="check" className="h-3.5 w-3.5 shrink-0" />
+                              Passwords match.
+                            </p>
+                          ) : null}
+                        </div>
+
+                        <button type="submit" disabled={submitting} className={SUBMIT_CLASS}>
+                          {submitting ? (
+                            <Spinner className="h-4 w-4" />
+                          ) : (
+                            <Icon name="shield" className="h-4 w-4" />
+                          )}
+                          <span>{submitting ? 'Creating account…' : 'Create Password & Sign In'}</span>
+                        </button>
+                      </form>
+                    ) : (
+                      <form onSubmit={onSignIn} className="space-y-4" noValidate>
+                        <div>
+                          <label htmlFor="login-password" className={LABEL_CLASS}>
+                            Password
+                          </label>
+                          <div className="relative">
+                            <input
+                              id="login-password"
+                              ref={passwordRef}
+                              type={showPassword ? 'text' : 'password'}
+                              name="password"
+                              autoComplete="current-password"
+                              placeholder="••••••••••"
+                              value={password}
+                              onChange={(event) => setPassword(event.target.value)}
+                              disabled={submitting}
+                              required
+                              className={`${INPUT_CLASS} pr-11`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowPassword((visible) => !visible)}
+                              className="absolute top-1/2 right-3 -translate-y-1/2 text-slate-400 transition hover:text-slate-600"
+                              aria-label={showPassword ? 'Hide password' : 'Show password'}
+                              tabIndex={-1}
+                            >
+                              <Icon name={showPassword ? 'eyeOff' : 'eye'} className="h-4 w-4" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                          <label className="flex cursor-pointer items-center gap-2 text-[0.8rem] text-slate-600">
+                            <input
+                              type="checkbox"
+                              checked={rememberMe}
+                              onChange={(event) => setRememberMe(event.target.checked)}
+                              disabled={submitting}
+                              className="h-4 w-4 rounded border-slate-300 accent-blue-600 focus:ring-blue-500/30"
+                            />
+                            Keep me signed in
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => setForgotHint((visible) => !visible)}
+                            className="text-sm font-medium text-blue-600 hover:underline"
+                          >
+                            Forgot Password?
+                          </button>
+                        </div>
+
+                        {forgotHint ? (
+                          <p className="rounded-lg bg-slate-50 px-3 py-2 text-[0.72rem] leading-relaxed text-slate-500 ring-1 ring-slate-900/5">
+                            Password resets are handled by your transport administrator. Contact the
+                            Department of Transport &amp; Resource Management.
+                          </p>
+                        ) : null}
+
+                        <button type="submit" disabled={submitting} className={SUBMIT_CLASS}>
+                          {submitting ? (
+                            <Spinner className="h-4 w-4" />
+                          ) : (
+                            <Icon name="logout" className="h-4 w-4" />
+                          )}
+                          <span>{submitting ? 'Signing in…' : 'Sign In'}</span>
+                        </button>
+                      </form>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <p className="mt-3 text-center text-xs text-slate-400">
+                Authorised staff only. All access is logged and audited under system policy.
+              </p>
             </div>
           </div>
 

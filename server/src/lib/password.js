@@ -8,8 +8,26 @@ export async function hashPassword(plain) {
 }
 
 export async function verifyPassword(plain, hash) {
-  if (!hash) return false;
+  // Guard first: a passwordless account stores a sentinel (see PASSWORD_UNSET),
+  // and bcrypt must never be handed a non-bcrypt digest.
+  if (!isPasswordSet(hash)) return false;
   return bcrypt.compare(plain, hash);
+}
+
+/**
+ * Sentinel stored in `users.password_hash` for an account an administrator has
+ * created but whose owner has not chosen a password yet (the first-time-user
+ * flow). Every real hash is a bcrypt string beginning `$2`, so the sentinel can
+ * never match and `isPasswordSet` is a reliable "has a password" test.
+ *
+ * A sentinel is used rather than a nullable column because SQLite cannot drop
+ * NOT NULL in place, and rebuilding `users` — which half the schema references
+ * by foreign key — is not a migration to run unattended on a live database.
+ */
+export const PASSWORD_UNSET = '!unset';
+
+export function isPasswordSet(hash) {
+  return typeof hash === 'string' && hash.startsWith('$2');
 }
 
 const COMMON_PASSWORDS = new Set([

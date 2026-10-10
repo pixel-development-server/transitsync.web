@@ -26,7 +26,7 @@ import {
 } from '../components/form.jsx';
 import { api } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
-import { useApi, useDebounced, usePagination } from '../lib/hooks.js';
+import { copyText, useApi, useDebounced, usePagination } from '../lib/hooks.js';
 import { useToast } from '../lib/toast.jsx';
 import { formatDateTime, formatRelative, initials, titleCase } from '../lib/format.js';
 
@@ -211,7 +211,7 @@ function PermissionsDialog({ open, onClose, onSaved, user, roles, permissionMatr
   );
 }
 
-function UserDialog({ open, onClose, onSaved, user, roles }) {
+function UserDialog({ open, onClose, onSaved, onCreated, user, roles }) {
   const toast = useToast();
   const [form, setForm] = useState(EMPTY_USER);
   const [error, setError] = useState(null);
@@ -262,18 +262,27 @@ function UserDialog({ open, onClose, onSaved, user, roles }) {
         });
         toast.success(`${form.fullName} updated.`);
       } else {
-        await api.post('/users', {
-          email: form.email.trim().toLowerCase(),
+        const email = form.email.trim().toLowerCase();
+        const response = await api.post('/users', {
+          email,
           fullName: form.fullName.trim(),
           roleId: Number(form.roleId),
           jobTitle: form.jobTitle.trim() || null,
           department: form.department.trim() || null,
           phone: form.phone.trim() || null,
-          temporaryPassword: form.temporaryPassword || undefined,
+          temporaryPassword: form.temporaryPassword.trim() || undefined,
           permissionsMode: 'INHERIT',
           forcePasswordChange: true,
         });
-        toast.success(`${form.fullName} added. They must change the password at first sign-in.`);
+        // Either a one-time temporary password comes back (hand it to the
+        // parent so it can be shown before it is gone forever), or the account
+        // was created passwordless and its owner sets one at first sign-in.
+        onCreated?.({
+          fullName: form.fullName.trim(),
+          email,
+          temporaryPassword: response?.data?.temporaryPassword ?? '',
+          mustSetPassword: Boolean(response?.data?.mustSetPassword),
+        });
       }
       onSaved();
       onClose();
@@ -289,7 +298,7 @@ function UserDialog({ open, onClose, onSaved, user, roles }) {
       open={open}
       onClose={onClose}
       title={user ? `Edit ${user.fullName}` : 'Create a staff account'}
-      subtitle={user ? user.email : 'Accounts start with a temporary password that must be rotated on first sign-in.'}
+      subtitle={user ? user.email : 'Set a temporary password, or invite them to choose their own at first sign-in.'}
       footer={
         <>
           <button type="button" className="btn btn-ghost" onClick={onClose} disabled={saving}>
@@ -346,7 +355,7 @@ function UserDialog({ open, onClose, onSaved, user, roles }) {
               checked={showPassword}
               onChange={setShowPassword}
               label="Set a temporary password"
-              hint="Leave off to have one generated automatically."
+              hint="Leave off and the staff member chooses their own password at first sign-in."
             />
             {showPassword ? (
               <div className="mt-3">
@@ -355,7 +364,7 @@ function UserDialog({ open, onClose, onSaved, user, roles }) {
                   value={form.temporaryPassword}
                   onChange={set('temporaryPassword')}
                   error={fieldErrors.temporaryPassword}
-                  placeholder="At least 10 characters"
+                  placeholder="Any value — the holder sets their own at first sign-in"
                   disabled={saving}
                 />
               </div>
@@ -363,6 +372,65 @@ function UserDialog({ open, onClose, onSaved, user, roles }) {
           </div>
         ) : null}
       </form>
+    </Modal>
+  );
+}
+
+/**
+ * One-time credential handover.
+ *
+ * The server returns the temporary password only at creation time, so this is
+ * the admin's single chance to capture it. `copyText` copies both fields in one
+ * click; the dialog states plainly that the value cannot be retrieved again.
+ */
+function CredentialDialog({ credential, onClose }) {
+  const toast = useToast();
+
+  const copy = async () => {
+    const ok = await copyText(
+      `TransitSync sign-in\nEmail: ${credential.email}\nTemporary password: ${credential.temporaryPassword}`,
+    );
+    if (ok) toast.success('Credentials copied to the clipboard.');
+    else toast.error('Could not copy automatically — select the password and copy it manually.');
+  };
+
+  return (
+    <Modal
+      open={Boolean(credential)}
+      onClose={onClose}
+      size="sm"
+      title="Temporary password"
+      subtitle={`Shown once — give it to ${credential?.fullName || 'the new user'} to sign in.`}
+      footer={
+        <>
+          <button type="button" className="btn btn-ghost" onClick={copy}>
+            <Icon name="copy" className="h-3.5 w-3.5" />
+            Copy
+          </button>
+          <button type="button" className="btn btn-primary" onClick={onClose}>
+            Done
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <div className="rounded-xl bg-[var(--surface-sunken)] p-3">
+          <p className="text-[0.65rem] font-semibold tracking-[0.08em] text-mist-500 uppercase">Email</p>
+          <p className="mt-0.5 truncate text-[0.85rem] font-medium text-mist-100">{credential?.email}</p>
+        </div>
+        <div className="rounded-xl bg-[var(--surface-sunken)] p-3">
+          <p className="text-[0.65rem] font-semibold tracking-[0.08em] text-mist-500 uppercase">
+            Temporary password
+          </p>
+          <p className="mt-0.5 font-mono text-[1.05rem] font-semibold tracking-wide text-mist-100 select-all">
+            {credential?.temporaryPassword}
+          </p>
+        </div>
+        <p className="text-[0.78rem] leading-relaxed text-mist-400">
+          {credential?.fullName || 'The new user'} must set their own password the first time they sign in.
+          This temporary password cannot be shown again.
+        </p>
+      </div>
     </Modal>
   );
 }
@@ -382,6 +450,7 @@ export default function Users() {
   const [deleting, setDeleting] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [resetting, setResetting] = useState(null);
+  const [issued, setIssued] = useState(null);
 
   const debouncedSearch = useDebounced(search);
 
@@ -430,6 +499,19 @@ export default function Users() {
     } catch (caught) {
       toast.error(caught.message);
     }
+  };
+
+  // A create either yields a one-time temporary password (show it once) or a
+  // passwordless invite whose owner sets their own password at first sign-in.
+  const handleCreated = (credential) => {
+    if (credential?.temporaryPassword) {
+      setIssued(credential);
+      return;
+    }
+    toast.info(
+      `${credential?.fullName ?? 'The new staff member'} was invited and will choose their own password on first sign-in.`,
+      { title: 'Invitation created' },
+    );
   };
 
   const columns = [
@@ -652,9 +734,12 @@ export default function Users() {
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
         onSaved={() => reload({ silent: true })}
+        onCreated={handleCreated}
         user={editing}
         roles={roles}
       />
+
+      <CredentialDialog credential={issued} onClose={() => setIssued(null)} />
 
       <PermissionsDialog
         open={Boolean(permUser)}

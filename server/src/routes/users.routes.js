@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 
 import { getDb } from '../db/connection.js';
 import { asyncHandler, validate, parsePagination, paginationMeta } from '../lib/http.js';
-import { hashPassword, checkPasswordPolicy } from '../lib/password.js';
+import { hashPassword, PASSWORD_UNSET } from '../lib/password.js';
 import { badRequest, conflict, notFound, unprocessable, forbidden } from '../lib/errors.js';
 import { requirePermission } from '../middleware/requirePermission.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -39,9 +39,22 @@ function assertKnownPermissions(permissions = []) {
   }
 }
 
+/**
+ * Single-use handover credential.
+ *
+ * Deliberately simple: a temporary password is exempt from the user-facing
+ * complexity policy (the holder is forced to set their own password at first
+ * sign-in), so we favour a short, unambiguous string that is easy to read aloud
+ * or retype. The alphabet omits i/l/o/0/1 to avoid transcription mistakes.
+ */
 function generateTemporaryPassword() {
-  // Readable, policy-compliant, and still high entropy.
-  return `Ts!${crypto.randomBytes(6).toString('base64url')}7Q`;
+  const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const bytes = crypto.randomBytes(8);
+  let password = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    password += alphabet[bytes[i] % alphabet.length];
+  }
+  return password;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,13 +253,21 @@ router.post(
 
     assertKnownPermissions(permissions);
 
-    const plain = temporaryPassword || generateTemporaryPassword();
-    const policy = checkPasswordPolicy(plain, { email, fullName });
-    if (!policy.valid) {
-      throw unprocessable('Temporary password does not meet the policy.', policy.errors.map((message) => ({ field: 'temporaryPassword', message })));
-    }
-
-    const passwordHash = await hashPassword(plain);
+    // Two ways to invite a staff member:
+    //
+    //  * An explicit temporary password creates a usable login. It is exempt
+    //    from the complexity policy (a single-use handover credential) and the
+    //    holder is rotated to their own password at first sign-in unless the
+    //    admin vouches for it with `forcePasswordChange: false`.
+    //  * Leaving the field blank creates a passwordless `invited` account. Its
+    //    owner claims it through the first-time setup step of the two-step
+    //    sign-in (`/auth/set-first-password`), choosing their own password.
+    const issuedPassword = temporaryPassword?.trim() || null;
+    const passwordHash = issuedPassword ? await hashPassword(issuedPassword) : PASSWORD_UNSET;
+    const accountStatus = issuedPassword ? 'active' : 'invited';
+    const isFirstLogin = issuedPassword ? (forcePasswordChange ? 1 : 0) : 1;
+    const passwordChanged = issuedPassword ? (forcePasswordChange ? 0 : 1) : 0;
+    const forceReset = issuedPassword ? (forcePasswordChange ? 1 : 0) : 0;
 
     const userId = db.transaction(() => {
       const result = db
@@ -254,18 +275,15 @@ router.post(
 `INSERT INTO users
            (email, full_name, password_hash, phone, job_title, department, role_id,
             status, is_first_login, password_changed, force_password_reset, permissions_mode, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
         .run(
           email, fullName, passwordHash, phone ?? null, jobTitle ?? null, department ?? null,
           roleId,
-          // `forcePasswordChange: false` means the admin vouches that the
-          // temporary password is already the user's own, so the account must
-          // NOT be walled behind the rotation gate. Ignoring the flag here
-          // locked those users out of everything except the bootstrap routes.
-          forcePasswordChange ? 1 : 0,
-          forcePasswordChange ? 0 : 1,
-          forcePasswordChange ? 1 : 0,
+          accountStatus,
+          isFirstLogin,
+          passwordChanged,
+          forceReset,
           permissionsMode,
           req.user.id,
         );
@@ -291,8 +309,11 @@ router.post(
       data: {
         user: publicUser(created),
         // Shown once so the admin can hand the credentials over out of band.
-        temporaryPassword: plain,
-        notice: 'Share this temporary password securely. The holder must change it at first sign-in.',
+        temporaryPassword: issuedPassword,
+        mustSetPassword: !issuedPassword,
+        notice: issuedPassword
+          ? 'Share this temporary password securely. The holder must change it at first sign-in.'
+          : 'No password was set. This staff member will choose their own password on first sign-in.',
       },
     });
   }),
@@ -467,7 +488,7 @@ router.post(
   }),
 );
 
-/** Admin-issued one-time password (keeps the strict policy server-side). */
+/** Admin-issued one-time password (single-use, complexity-exempt). */
 router.post(
   '/:id/reset-password',
   requirePermission('users:edit'),

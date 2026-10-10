@@ -77,15 +77,26 @@ export function AuthProvider({ children }) {
     loadSession();
   }, [loadSession]);
 
-  const signIn = useCallback(async (email, password, rememberMe = false) => {
-    const response = await api.post('/auth/login', { email, password, rememberMe });
-    const data = response.data;
+  /**
+   * Adopt a session handed back by any credential endpoint (`/auth/login` or
+   * `/auth/set-first-password`). The token is stored and `/me` is re-read rather
+   * than trusting the payload, because `/me` carries the effective permission
+   * array and session row the app actually runs on.
+   */
+  const establishSession = useCallback(async (data) => {
+    if (!data?.token) return null;
     setToken(data.token);
-    // Re-read /me rather than trusting the login payload: it carries the
-    // effective permission array and session row the app actually runs on.
     const me = await loadSession({ silent: true });
-    return me ?? data.user;
+    return me ?? data.user ?? null;
   }, [loadSession]);
+
+  const signIn = useCallback(
+    async (email, password, rememberMe = false) => {
+      const response = await api.post('/auth/login', { email, password, rememberMe });
+      return establishSession(response.data);
+    },
+    [establishSession],
+  );
 
   const value = useMemo(
     () => ({
@@ -100,10 +111,11 @@ export function AuthProvider({ children }) {
       can: (permission) => permissions.has(permission),
       canAny: (...list) => list.some((permission) => permissions.has(permission)),
       signIn,
+      establishSession,
       signOut,
       refresh: loadSession,
     }),
-    [user, session, loading, refreshing, permissions, mustChangePassword, signIn, signOut, loadSession],
+    [user, session, loading, refreshing, permissions, mustChangePassword, signIn, establishSession, signOut, loadSession],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

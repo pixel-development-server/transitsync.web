@@ -679,6 +679,80 @@ test('creating a user returns a one-time temporary password', async () => {
   assert.equal(response.body.data.temporaryPassword, 'WelcomePass!2024');
 });
 
+test('a blank temporary password creates a passwordless invited account', async () => {
+  const email = `invite-${Date.now()}@transitsync.edu.np`;
+  const created = await call(ctx, 'POST', '/api/users', {
+    token: admin.token,
+    body: {
+      email,
+      fullName: 'Invited Staff',
+      roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
+      forcePasswordChange: true,
+    },
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.data.temporaryPassword, null);
+  assert.equal(created.body.data.mustSetPassword, true);
+  assert.equal(created.body.data.user.status, 'invited');
+
+  // The invite cannot sign in until it is claimed.
+  const blocked = await call(ctx, 'POST', '/api/auth/login', { body: { email, password: 'anything' } });
+  assert.equal(blocked.status, 401);
+
+  // Step 1 reports a first-time user; step 2b claims the account.
+  const probe = await call(ctx, 'POST', '/api/auth/check-email', { body: { email } });
+  assert.equal(probe.status, 200);
+  assert.equal(probe.body.data.status, 'FIRST_TIME_USER');
+
+  const claimed = await call(ctx, 'POST', '/api/auth/set-first-password', {
+    body: { email, password: 'Kestrel!2026', confirmPassword: 'Kestrel!2026' },
+  });
+  assert.equal(claimed.status, 201);
+  assert.equal(claimed.body.data.mustChangePassword, false);
+  assert.equal(typeof claimed.body.data.token, 'string');
+
+  // Claimed once, then it behaves like any password account.
+  const reprobe = await call(ctx, 'POST', '/api/auth/check-email', { body: { email } });
+  assert.equal(reprobe.body.data.status, 'EXISTS_WITH_PASSWORD');
+
+  // A second claim is refused — the account is no longer passwordless.
+  const taken = await call(ctx, 'POST', '/api/auth/set-first-password', {
+    body: { email, password: 'Falcon!2027', confirmPassword: 'Falcon!2027' },
+  });
+  assert.equal(taken.status, 409);
+
+  const session = await login(ctx, email, 'Kestrel!2026');
+  assert.equal(session.mustChangePassword, false);
+});
+
+test('check-email reports NOT_FOUND and accepts a simple temporary password', async () => {
+  const missing = await call(ctx, 'POST', '/api/auth/check-email', {
+    body: { email: `nobody-${Date.now()}@transitsync.edu.np` },
+  });
+  assert.equal(missing.status, 200);
+  assert.equal(missing.body.data.status, 'NOT_FOUND');
+
+  const email = `simple-${Date.now()}@transitsync.edu.np`;
+  const simple = await call(ctx, 'POST', '/api/users', {
+    token: admin.token,
+    body: {
+      email,
+      fullName: 'Simple Credential',
+      roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
+      temporaryPassword: 'abc',
+      forcePasswordChange: true,
+    },
+  });
+  assert.equal(simple.status, 201);
+  assert.equal(simple.body.data.temporaryPassword, 'abc');
+
+  const probe = await call(ctx, 'POST', '/api/auth/check-email', { body: { email } });
+  assert.equal(probe.body.data.status, 'EXISTS_WITH_PASSWORD');
+
+  const session = await login(ctx, email, 'abc');
+  assert.equal(session.mustChangePassword, true);
+});
+
 test('admin-issued password reset invalidates the old credential', async () => {
   const email = `reset-${Date.now()}@transitsync.edu.np`;
   const created = await call(ctx, 'POST', '/api/users', {

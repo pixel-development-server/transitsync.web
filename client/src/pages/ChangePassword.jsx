@@ -74,7 +74,9 @@ export default function ChangePassword() {
           <span className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-2xl bg-amber-500/12 text-amber-400 ring-1 ring-amber-500/25">
             <Icon name="key" className="h-6 w-6" />
           </span>
-          <h1 className="text-xl font-bold tracking-tight text-mist-100">Set a new password</h1>
+          <h1 className="text-xl font-bold tracking-tight text-mist-100">
+            {user?.isFirstLogin ? 'Create your password' : 'Set a new password'}
+          </h1>
           <p className="mt-1.5 text-[0.84rem] leading-relaxed text-mist-400">
             {user?.isFirstLogin
               ? 'Your account was created with a temporary password. Choose your own before continuing.'
