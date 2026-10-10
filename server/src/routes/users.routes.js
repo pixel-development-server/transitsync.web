@@ -557,6 +557,47 @@ router.delete(
   }),
 );
 
+/**
+ * Hard delete a staff account.
+ *
+ * The soft delete above is right for a live account: it frees the email for
+ * reuse while keeping historical rows attributable. But an account that is
+ * *already suspended* has nothing left to disable, and repeatedly soft-deleting
+ * one merely stacks `.deleted.<id>` suffixes. This route removes it for good.
+ *
+ * Integrity is safe: `user_permissions` and `login_sessions` cascade away, every
+ * other reference (`created_by`, `driver_user_id`, alert handlers, …) is
+ * `ON DELETE SET NULL`, and audit rows retain their denormalised `actor_email`.
+ * The last-active-Administrator and self-deletion guards mirror the soft delete.
+ */
+router.delete(
+  '/:id/purge',
+  requirePermission('users:delete'),
+  validate(idSchema, 'params'),
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    const id = Number(req.params.id);
+    if (id === Number(req.user.id)) throw badRequest('You cannot delete your own account.');
+
+    const target = loadUserForAuth(db, id);
+    if (!target) throw notFound('Staff member');
+
+    if (target.role_key === ROLE_KEYS.SYSTEM_ADMIN) {
+      const remaining = db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM users u JOIN roles r ON r.id = u.role_id
+            WHERE r.key = ? AND u.status = 'active' AND u.id <> ?`,
+        )
+        .get(ROLE_KEYS.SYSTEM_ADMIN, id).n;
+      if (remaining === 0) throw badRequest('At least one active System Administrator must remain.');
+    }
+
+    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    recordAudit(fromRequest(req, 'user.purge', { entity: 'user', entityId: id, detail: { email: target.email } }));
+    res.json({ success: true, data: { message: `${target.full_name} has been permanently deleted.` } });
+  }),
+);
+
 export default router;
 
 // ---------------------------------------------------------------------------

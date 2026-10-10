@@ -476,11 +476,18 @@ export default function Users() {
     setStatus('');
   };
 
+  // Deleting a live account disables it (soft delete, email freed for reuse).
+  // Deleting an account that is already suspended removes it for good, since
+  // there is nothing left to disable and soft-deleting again only stacks
+  // `.deleted.<id>` suffixes on the address.
   const confirmDelete = async () => {
     setDeleteBusy(true);
+    const purging = deleting?.status === 'suspended';
     try {
-      await api.del(`/users/${deleting.id}`);
-      toast.success(`${deleting.fullName} removed.`);
+      await api.del(purging ? `/users/${deleting.id}/purge` : `/users/${deleting.id}`);
+      toast.success(
+        purging ? `${deleting.fullName} permanently deleted.` : `${deleting.fullName} removed.`,
+      );
       setDeleting(null);
       reload({ silent: true });
     } catch (caught) {
@@ -651,8 +658,12 @@ export default function Users() {
               type="button"
               className="btn btn-danger !p-1.5"
               onClick={() => setDeleting(row)}
-              aria-label={`Delete ${row.fullName}`}
-              title="Delete"
+              aria-label={
+                row.status === 'suspended'
+                  ? `Delete ${row.fullName} permanently`
+                  : `Delete ${row.fullName}`
+              }
+              title={row.status === 'suspended' ? 'Delete permanently' : 'Delete'}
             >
               <Icon name="trash" className="h-3.5 w-3.5" />
             </button>
@@ -755,9 +766,16 @@ export default function Users() {
         onClose={() => setDeleting(null)}
         onConfirm={confirmDelete}
         busy={deleteBusy}
-        title="Delete user"
-        confirmLabel="Delete"
-        message={deleting ? `Delete ${deleting.fullName} (${deleting.email})? Their audit history is retained.` : ''}
+        tone={deleting?.status === 'suspended' ? 'danger' : undefined}
+        title={deleting?.status === 'suspended' ? 'Delete user permanently' : 'Delete user'}
+        confirmLabel={deleting?.status === 'suspended' ? 'Delete permanently' : 'Delete'}
+        message={
+          deleting
+            ? deleting.status === 'suspended'
+              ? `Permanently delete ${deleting.fullName} (${deleting.email})? This account is already suspended and cannot sign in. Its audit history is retained, but the account cannot be undone.`
+              : `Delete ${deleting.fullName} (${deleting.email})? Their audit history is retained.`
+            : ''
+        }
       />
 
       <ConfirmDialog

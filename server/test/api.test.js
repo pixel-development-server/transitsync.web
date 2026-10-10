@@ -836,6 +836,39 @@ test('deleting a user soft-deletes and frees the email for reuse policy', async 
   assert.equal(login.status, 401);
 });
 
+test('a suspended account can be purged (hard-deleted)', async () => {
+  const email = `purge-${Date.now()}@transitsync.edu.np`;
+  const created = await call(ctx, 'POST', '/api/users', {
+    token: admin.token,
+    body: { email, fullName: 'Purge Me', roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT), temporaryPassword: 'Harbour7Lantern!' },
+  });
+  const userId = created.body.data.user.id;
+
+  // The realistic path: suspend, then remove for good.
+  const suspended = await call(ctx, 'PATCH', `/api/users/${userId}`, {
+    token: admin.token,
+    body: { status: 'suspended' },
+  });
+  assert.equal(suspended.status, 200);
+
+  const purged = await call(ctx, 'DELETE', `/api/users/${userId}/purge`, { token: admin.token });
+  assert.equal(purged.status, 200);
+
+  // The row is gone entirely, not merely soft-deleted.
+  const found = ctx.db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
+  assert.equal(found, undefined);
+
+  const list = await call(ctx, 'GET', `/api/users?search=${encodeURIComponent(email)}`, { token: admin.token });
+  assert.equal(list.body.data.users.length, 0);
+});
+
+test('purging is refused for your own account', async () => {
+  const me = await call(ctx, 'GET', '/api/auth/me', { token: admin.token });
+  const response = await call(ctx, 'DELETE', `/api/users/${me.body.data.user.id}/purge`, { token: admin.token });
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /cannot delete your own/i);
+});
+
 test('roles endpoint reports headcounts and permission sets', async () => {
   const response = await call(ctx, 'GET', '/api/roles', { token: admin.token });
   assert.equal(response.status, 200);
