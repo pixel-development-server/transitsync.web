@@ -1,6 +1,38 @@
+import { copyFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
+
+/**
+ * GitHub Pages SPA fallback.
+ *
+ * GitHub Pages answers any request that does not match a real file with its own
+ * `404.html`. Copying the built `index.html` to `404.html` makes a hard refresh
+ * — or a shared deep link such as /students/42 — boot the React app instead,
+ * because the browser keeps the requested URL and React Router resolves the
+ * same route on load. Netlify-style `_redirects` files are ignored by Pages, so
+ * this copy is the mechanism that actually works on our host.
+ *
+ * Generated after the bundle is written so the fallback points at the same
+ * content-hashed assets as the real entry document.
+ */
+function spaFallback404() {
+  let outDir = 'dist';
+  return {
+    name: 'spa-fallback-404',
+    apply: 'build',
+    configResolved(config) {
+      outDir = config.build.outDir;
+    },
+    closeBundle() {
+      const index = resolve(outDir, 'index.html');
+      const fallback = resolve(outDir, '404.html');
+      if (existsSync(index)) copyFileSync(index, fallback);
+    },
+  };
+}
 
 // The Express server serves `dist/` in production and proxies nothing, so the
 // dev server must proxy `/api` itself. Proxying (rather than pointing fetch at
@@ -10,7 +42,7 @@ import tailwindcss from '@tailwindcss/vite';
 const API_TARGET = process.env.VITE_API_TARGET || 'http://localhost:8080';
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), spaFallback404()],
   server: {
     port: 5173,
     // Listen on every interface so phones/tablets on the LAN — and machines on a

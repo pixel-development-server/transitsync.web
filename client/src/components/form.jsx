@@ -152,21 +152,58 @@ export function Checkbox({ label, hint, error, className = '', ...props }) {
   );
 }
 
-export function Toggle({ checked, onChange, label, hint, disabled }) {
+/**
+ * Accessible on/off switch.
+ *
+ * Built from a native checkbox with `role="switch"` so the control is a single
+ * label target, keyboard-operable and screen-reader friendly.
+ *
+ * The visible track and thumb are siblings of the input — required for
+ * Tailwind's `peer-*` variants, which use the general-sibling combinator. The
+ * previous markup nested an absolutely-positioned thumb inside a <button>;
+ * because a button carries `text-align: center`, the thumb's static position
+ * was the middle of the track, so the `translate-x-*` transforms pushed it off
+ * the right edge (checked) and off-centre (unchecked). A checkbox has no such
+ * UA text alignment, and `left-0.5` + `translate-x-full` keeps the 5-unit thumb
+ * inset by exactly 2px on both sides of the 11-unit track, in both states.
+ */
+export function Toggle({ checked, onChange, label, hint, disabled, id }) {
+  const generatedId = useId();
+  const inputId = id ?? generatedId;
+
   return (
-    <label className={`flex items-start gap-2.5 ${disabled ? 'opacity-55' : 'cursor-pointer'}`}>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        disabled={disabled}
-        onClick={() => onChange(!checked)}
-        className={`relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors ${checked ? 'bg-sky-500' : 'bg-ink-600'}`}
-      >
-        <span
-          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-4.5' : 'translate-x-0.5'}`}
+    <label
+      htmlFor={inputId}
+      className={`flex items-start gap-2.5 ${disabled ? 'cursor-not-allowed opacity-55' : 'cursor-pointer'}`}
+    >
+      <span className="relative inline-flex h-6 w-11 shrink-0">
+        <input
+          id={inputId}
+          type="checkbox"
+          role="switch"
+          aria-checked={checked}
+          checked={checked}
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.checked)}
+          className="peer sr-only"
         />
-      </button>
+        {/*
+         * Track. `peer-checked:` recolours it, `peer-focus-visible:` moves the
+         * focus ring here because the real input is visually hidden.
+         */}
+        <span
+          aria-hidden="true"
+          className="absolute inset-0 rounded-full bg-ink-600 transition-colors duration-200 peer-checked:bg-sky-500 peer-focus-visible:ring-2 peer-focus-visible:ring-sky-400/60 peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-[var(--surface-sunken)]"
+        />
+        {/*
+         * Thumb. Anchored top-left and translated exactly its own width when
+         * on, so it never overhangs the track.
+         */}
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform duration-200 peer-checked:translate-x-full"
+        />
+      </span>
       <span className="min-w-0">
         <span className="block text-[0.83rem] font-medium text-mist-200">{label}</span>
         {hint ? <span className="block text-[0.7rem] text-mist-500">{hint}</span> : null}

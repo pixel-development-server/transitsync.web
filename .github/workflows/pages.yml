@@ -43,6 +43,13 @@ jobs:
           VITE_API_URL: https://api.transitsync.me
         run: npm run build
 
+      # `client/vite.config.js` emits dist/404.html as a copy of index.html so
+      # GitHub Pages deep links (e.g. /students/42) boot the SPA on a hard
+      # refresh instead of Pages' own 404. Guard it so a regression fails here
+      # rather than silently breaking routing in production.
+      - name: Verify SPA fallback was generated
+        run: test -f client/dist/404.html
+
       - name: Add the custom-domain marker (CNAME)
         run: echo "transitsync.me" > client/dist/CNAME
 
