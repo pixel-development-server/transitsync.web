@@ -260,13 +260,15 @@ export function FormError({ error, onDismiss }) {
       <Icon name="alert" className="mt-px h-4 w-4 shrink-0" />
       <div className="min-w-0 flex-1">
         <p className="font-semibold">{error.message}</p>
-        {error.details?.length > 1 ? (
+        {Array.isArray(error.details) && error.details.length > 1 ? (
           <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[0.74rem] opacity-90">
-            {error.details.slice(0, 6).map((detail, index) => (
-              <li key={index}>
-                <span className="font-medium">{detail.field}</span>: {detail.message}
-              </li>
-            ))}
+            {error.details
+              .slice(0, 6)
+              .map((detail, index) => (
+                <li key={index}>
+                  <span className="font-medium">{detail?.field ?? 'field'}</span>: {detail?.message ?? 'Invalid value.'}
+                </li>
+              ))}
           </ul>
         ) : null}
       </div>

@@ -105,6 +105,10 @@ router.get(
 
     const clauses = [];
     const params = [];
+    // The /users console is the Staff Accounts & RBAC surface. Student auth
+    // accounts (role `student`) are managed through the Students registry
+    // instead, so they are never listed here.
+    clauses.push("(r.key IS NULL OR r.key <> 'student')");
     if (search) {
       clauses.push('(u.full_name LIKE ? OR u.email LIKE ? OR u.job_title LIKE ?)');
       const term = `%${search}%`;

@@ -720,7 +720,7 @@ router.post(
 
     const student = db
       .prepare(
-        `SELECT s.id, s.full_name, s.status, s.is_claimed, s.tenant_id,
+        `SELECT s.id, s.full_name, s.status, s.is_claimed, s.user_id, s.tenant_id,
                 i.name AS college_name, i.status AS college_status
            FROM students s LEFT JOIN institutions i ON i.id = s.tenant_id
           WHERE LOWER(s.email) = ?`,
@@ -756,7 +756,14 @@ router.post(
       });
     }
 
-    const firstTime = !Number(student.is_claimed);
+    // "First time" means the student has no usable password yet. That covers a
+    // plain unclaimed roster row and a staff-provisioned `role=student` account
+    // (status 'invited', password sentinel) that is waiting on a first password.
+    const linkedAccount = student.user_id
+      ? db.prepare('SELECT password_hash FROM users WHERE id = ?').get(student.user_id)
+      : null;
+    const hasPassword = linkedAccount ? isPasswordSet(linkedAccount.password_hash) : false;
+    const firstTime = !Number(student.is_claimed) || Boolean(linkedAccount && !hasPassword);
 
     return res.json({
       success: true,
@@ -818,7 +825,23 @@ router.post(
       });
     }
 
-    if (Number(student.is_claimed) || student.user_id) {
+    // Resolve the paired account. Staff can pre-provision one (status
+    // 'invited', password sentinel) when they add the roster row, in which case
+    // this claim *sets* that first password instead of creating an account.
+    const linkedById = student.user_id
+      ? db.prepare('SELECT id, password_hash, status FROM users WHERE id = ?').get(student.user_id)
+      : null;
+    const emailClash = linkedById
+      ? null
+      : db.prepare('SELECT id, password_hash, status FROM users WHERE LOWER(email) = LOWER(?)').get(email);
+
+    if (linkedById && isPasswordSet(linkedById.password_hash)) {
+      throw conflict('This student account is already active. Sign in instead.');
+    }
+    if (emailClash && isPasswordSet(emailClash.password_hash)) {
+      throw conflict('That email address is already in use. Sign in instead.');
+    }
+    if (!linkedById && Number(student.is_claimed)) {
       throw conflict('This student account is already active. Sign in instead.');
     }
 
@@ -829,10 +852,6 @@ router.post(
     // too (the campus System Administrator is the exemption).
     const campusMaintenance = getInstitutionMaintenance(db, student.tenant_id);
     if (campusMaintenance?.isMaintenanceMode) throw maintenanceMode(institutionMaintenanceRejection(campusMaintenance));
-
-    if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) {
-      throw conflict('That email address is already in use. Sign in instead.');
-    }
 
     const policy = checkPasswordPolicy(password, { email, fullName: student.full_name });
     if (!policy.valid) {
@@ -848,6 +867,19 @@ router.post(
     const passwordHash = await hashPassword(password);
 
     const userId = db.transaction(() => {
+      const pending = linkedById ?? emailClash;
+      if (pending) {
+        db.prepare(
+          `UPDATE users SET password_hash = ?, status = 'active', is_first_login = 0,
+                            password_changed = 1, force_password_reset = 0,
+                            updated_at = datetime('now') WHERE id = ?`,
+        ).run(passwordHash, pending.id);
+        db.prepare(
+          "UPDATE students SET user_id = ?, is_claimed = 1, updated_at = datetime('now') WHERE id = ?",
+        ).run(pending.id, student.id);
+        return pending.id;
+      }
+
       const result = db
         .prepare(
           `INSERT INTO users

@@ -19,7 +19,7 @@ function translateDatabaseError(error) {
     const columns = message.split('UNIQUE constraint failed:')[1]?.trim() ?? '';
     return new AppError(409, `A record with that ${humaniseColumns(columns)} already exists.`, {
       code: 'DUPLICATE',
-      details: { columns },
+      details: [{ field: 'value', message: `${humaniseColumns(columns)} is already in use.` }],
     });
   }
   if (message.includes('FOREIGN KEY constraint failed')) {
@@ -30,13 +30,12 @@ function translateDatabaseError(error) {
   if (message.includes('CHECK constraint failed')) {
     return new AppError(422, 'A value is outside the allowed range for this field.', {
       code: 'CONSTRAINT_VIOLATION',
-      details: { raw: message },
+      details: [{ field: 'value', message: 'A value is outside the allowed range for this field.' }],
     });
   }
   if (message.includes('no such column')) {
     return new AppError(500, 'The database schema is out of date. Run `npm run migrate`.', {
       code: 'SCHEMA_DRIFT',
-      details: { raw: message },
     });
   }
   return null;
@@ -83,11 +82,14 @@ export function errorHandler(error, req, res, next) {
     );
   }
 
+  const responseMessage = isServerFault && config.isProduction ? 'An unexpected server error occurred.' : message;
+
   res.status(status).json({
     success: false,
+    message: responseMessage,
     error: {
       code,
-      message: isServerFault && config.isProduction ? 'An unexpected server error occurred.' : message,
+      message: responseMessage,
       ...(details && !isServerFault ? { details } : {}),
       ...(config.isProduction || !isServerFault
         ? {}

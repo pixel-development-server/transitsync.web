@@ -197,4 +197,89 @@ router.get(
   }),
 );
 
+/**
+ * GET /api/student/routes — live, read-only schedule board.
+ *
+ * The portal is route-centric: students browse every active route and the bus
+ * currently running it, so staff never have to assign a student to a route by
+ * hand. Scoped to the rider's own campus when the roster row carries a tenant;
+ * otherwise the shared (tenant-less) route set is shown.
+ */
+router.get(
+  '/routes',
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    const me = db.prepare('SELECT id, tenant_id, route_id FROM students WHERE user_id = ?').get(req.user.id);
+    const tenant = me?.tenant_id ?? null;
+
+    const rows = db
+      .prepare(
+        `SELECT r.*,
+                (SELECT COUNT(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stop_count,
+                (SELECT COUNT(*) FROM buses b WHERE b.current_route_id = r.id AND b.status = 'ACTIVE') AS bus_count
+           FROM routes r
+          WHERE r.is_active = 1
+            AND (? IS NULL OR r.tenant_id IS NULL OR r.tenant_id = ?)
+          ORDER BY r.code ASC`,
+      )
+      .all(tenant, tenant);
+
+    const routes = rows.map((row) => {
+      const stops = db
+        .prepare('SELECT name, sequence, scheduled_time FROM route_stops WHERE route_id = ? ORDER BY sequence')
+        .all(row.id);
+      const buses = db
+        .prepare(
+          `SELECT b.id, b.code, b.name, b.registration_no, b.seat_capacity, b.status,
+                  b.driver_name, b.driver_phone,
+                  (SELECT COUNT(*) FROM students s
+                    WHERE s.onboard_bus_id = b.id AND s.status = 'ACTIVE') AS occupancy
+             FROM buses b
+            WHERE b.current_route_id = ? AND b.status = 'ACTIVE'
+            ORDER BY b.code ASC`,
+        )
+        .all(row.id);
+
+      return {
+        id: row.id,
+        code: row.code,
+        name: row.name,
+        description: row.description ?? null,
+        startPoint: row.start_point,
+        endPoint: row.end_point,
+        shift: row.shift,
+        departureTime: row.departure_time,
+        arrivalTime: row.arrival_time,
+        color: row.color ?? null,
+        stopCount: row.stop_count,
+        isMine: Boolean(me?.route_id && me.route_id === row.id),
+        stops: stops.map((stop) => ({
+          name: stop.name,
+          sequence: stop.sequence,
+          scheduledTime: stop.scheduled_time ?? null,
+        })),
+        buses: buses.map((bus) => {
+          const capacity = Number(bus.seat_capacity ?? 0);
+          const occupancy = Number(bus.occupancy ?? 0);
+          return {
+            id: bus.id,
+            code: bus.code,
+            name: bus.name,
+            registrationNo: bus.registration_no,
+            seatCapacity: capacity,
+            status: bus.status,
+            driverName: bus.driver_name ?? null,
+            driverPhone: bus.driver_phone ?? null,
+            occupancy,
+            utilization: capacity > 0 ? Math.round((occupancy / capacity) * 100) : 0,
+            onBoard: occupancy > 0,
+          };
+        }),
+      };
+    });
+
+    res.json({ success: true, data: { routes } });
+  }),
+);
+
 export default router;

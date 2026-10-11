@@ -36,12 +36,17 @@ export class ApiError extends Error {
     this.name = 'ApiError';
     this.code = code;
     this.status = status;
-    this.details = details;
+    // The server sometimes answers with a details *object* (e.g. translation of
+    // a DB constraint). Normalise to an array so field assertions like
+    // `Array.isArray(err.details)` and the `fieldErrors` getter never blow up
+    // with "details is not iterable".
+    this.details = Array.isArray(details) ? details : [];
   }
 
   /** `{ field, message }[]` → `{ field: message }` for form display. */
   get fieldErrors() {
     const out = {};
+    if (!Array.isArray(this.details)) return out;
     for (const detail of this.details) {
       if (detail?.field && !out[detail.field]) out[detail.field] = detail.message;
     }
@@ -177,7 +182,7 @@ function toErrorFromPayload(payload, status) {
     return err;
   }
 
-  return new ApiError({ code, message, details: error.details ?? [], status });
+  return new ApiError({ code, message, details: Array.isArray(error.details) ? error.details : [], status });
 }
 
 function defaultMessage(status) {

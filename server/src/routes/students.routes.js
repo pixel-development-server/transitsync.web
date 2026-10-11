@@ -3,6 +3,8 @@ import express from 'express';
 import { getDb } from '../db/connection.js';
 import { asyncHandler, validate, parsePagination, paginationMeta } from '../lib/http.js';
 import { badRequest, conflict, notFound } from '../lib/errors.js';
+import { PASSWORD_UNSET } from '../lib/password.js';
+import { ROLE_KEYS } from '../db/permissions.js';
 import { requirePermission } from '../middleware/requirePermission.js';
 import { requireAuth } from '../middleware/auth.js';
 import { recordAudit, fromRequest } from '../services/audit.js';
@@ -344,6 +346,44 @@ router.post(
       .run(...keys.map((key) => finalColumns[key]));
 
     recordAudit(fromRequest(req, 'student.create', { entity: 'student', entityId: Number(result.lastInsertRowid), detail: { collegeId: body.collegeId, cardStatus: requestedCard } }));
+
+    const studentId = Number(result.lastInsertRowid);
+
+    // Auto-sync the sign-in account so a staff-added roster row is a real,
+    // claimable portal account. The portal authenticates against `users`, so a
+    // roster row with an email gets a paired role=student account (status
+    // 'invited', password sentinel) that the student activates with a first
+    // password via the two-step check-email / student-register claim. If an
+    // account already exists for the address — e.g. the row was added after the
+    // student had already claimed — it is linked instead of duplicated.
+    if (body.email) {
+      const studentRole = db.prepare('SELECT id FROM roles WHERE key = ?').get(ROLE_KEYS.STUDENT);
+      const existingUser = studentRole
+        ? db.prepare('SELECT id FROM users WHERE LOWER(email) = LOWER(?)').get(body.email)
+        : null;
+      if (studentRole) {
+        let linkedUserId = existingUser?.id ?? null;
+        if (!linkedUserId) {
+          const provisioned = db
+            .prepare(
+              `INSERT INTO users
+                 (email, full_name, password_hash, status, role_id, tenant_id,
+                  is_first_login, password_changed, force_password_reset, permissions_mode)
+               VALUES (?, ?, ?, 'invited', ?, ?, 1, 0, 0, 'INHERIT')`,
+            )
+            .run(body.email, body.fullName, PASSWORD_UNSET, studentRole.id, req.user.tenant_id ?? null);
+          linkedUserId = Number(provisioned.lastInsertRowid);
+          recordAudit(fromRequest(req, 'student.invite_sent', {
+            entity: 'user',
+            entityId: linkedUserId,
+            detail: { email: body.email },
+          }));
+        }
+        db.prepare(
+          "UPDATE students SET user_id = ?, is_claimed = 1, updated_at = datetime('now') WHERE id = ?",
+        ).run(linkedUserId, studentId);
+      }
+    }
 
     const row = db.prepare(`${SELECT_STUDENT} WHERE s.id = ?`).get(Number(result.lastInsertRowid));
     res.status(201).json({ success: true, data: { student: shape(row) } });

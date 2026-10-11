@@ -238,6 +238,21 @@ busesRouter.post(
       if (!route) throw unprocessable('Unknown route.', [{ field: 'currentRouteId', message: 'Pick a valid route.' }]);
     }
 
+    const dupCode = db.prepare('SELECT id FROM buses WHERE code = ?').get(body.code);
+    if (dupCode) {
+      throw conflict(`A bus with the code "${body.code}" already exists.`, [
+        { field: 'code', message: `A bus with the code "${body.code}" already exists.` },
+      ]);
+    }
+    const dupReg = body.registrationNo
+      ? db.prepare('SELECT id FROM buses WHERE registration_no = ?').get(body.registrationNo)
+      : null;
+    if (dupReg) {
+      throw conflict('A bus with this registration number already exists.', [
+        { field: 'registrationNo', message: `"${body.registrationNo}" is already registered to another bus.` },
+      ]);
+    }
+
     const columns = toColumns(body, BUS_COLUMNS);
     const keys = Object.keys(columns);
     const result = db
@@ -272,6 +287,23 @@ busesRouter.patch(
     if (body.currentRouteId) {
       const route = db.prepare('SELECT id FROM routes WHERE id = ?').get(body.currentRouteId);
       if (!route) throw unprocessable('Unknown route.', [{ field: 'currentRouteId', message: 'Pick a valid route.' }]);
+    }
+
+    if (body.code !== undefined) {
+      const dup = db.prepare('SELECT id FROM buses WHERE code = ? AND id <> ?').get(body.code, id);
+      if (dup) {
+        throw conflict(`A bus with the code "${body.code}" already exists.`, [
+          { field: 'code', message: `A bus with the code "${body.code}" already exists.` },
+        ]);
+      }
+    }
+    if (body.registrationNo !== undefined) {
+      const dup = db.prepare('SELECT id FROM buses WHERE registration_no = ? AND id <> ?').get(body.registrationNo, id);
+      if (dup) {
+        throw conflict('A bus with this registration number already exists.', [
+          { field: 'registrationNo', message: `"${body.registrationNo}" is already registered to another bus.` },
+        ]);
+      }
     }
 
     const columns = toColumns(body, BUS_COLUMNS, { partial: true });
@@ -434,7 +466,21 @@ routesRouter.post(
   validate(createRouteSchema),
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const columns = toColumns(req.body, ROUTE_COLUMNS);
+    const body = req.body;
+    const dupCode = db.prepare('SELECT id FROM routes WHERE code = ?').get(body.code);
+    if (dupCode) {
+      throw conflict('A route with this code already exists.', [
+        { field: 'code', message: `"${body.code}" is already in use by another route.` },
+      ]);
+    }
+    const dupName = db.prepare('SELECT id FROM routes WHERE name = ?').get(body.name);
+    if (dupName) {
+      throw conflict('A route with this name already exists.', [
+        { field: 'name', message: `"${body.name}" is already in use by another route.` },
+      ]);
+    }
+
+    const columns = toColumns(body, ROUTE_COLUMNS);
     const keys = Object.keys(columns);
     const result = db
       .prepare(`INSERT INTO routes (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`)
@@ -457,7 +503,25 @@ routesRouter.patch(
     const id = Number(req.params.id);
     if (!db.prepare('SELECT id FROM routes WHERE id = ?').get(id)) throw notFound('Route');
 
-    const columns = toColumns(req.body, ROUTE_COLUMNS, { partial: true });
+    const body = req.body;
+    if (body.code !== undefined) {
+      const dup = db.prepare('SELECT id FROM routes WHERE code = ? AND id <> ?').get(body.code, id);
+      if (dup) {
+        throw conflict('A route with this code already exists.', [
+          { field: 'code', message: `"${body.code}" is already in use by another route.` },
+        ]);
+      }
+    }
+    if (body.name !== undefined) {
+      const dup = db.prepare('SELECT id FROM routes WHERE name = ? AND id <> ?').get(body.name, id);
+      if (dup) {
+        throw conflict('A route with this name already exists.', [
+          { field: 'name', message: `"${body.name}" is already in use by another route.` },
+        ]);
+      }
+    }
+
+    const columns = toColumns(body, ROUTE_COLUMNS, { partial: true });
     if (Object.keys(columns).length === 0) throw badRequest('Nothing to update.');
 
     db.prepare(

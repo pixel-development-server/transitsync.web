@@ -1,17 +1,18 @@
 /**
  * Student rider portal (read-only).
  *
- * A pre-authorized student signs in here to see a single thing: their own
- * assigned route, the bus and driver on it, the scheduled departure, and a live
- * badge for where they are in the journey. There are no controls — every action
- * lives in the operations console.
+ * Route-centric by design: students browse every active campus route and the
+ * shuttle running it — code, schedule, stops and live occupancy — without staff
+ * ever assigning a student to a route individually. The rider's own assignment
+ * (if the college set one) is highlighted on the board and summarised below.
+ * There are no controls — every action lives in the operations console.
  */
 
 import { useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { Icon } from '../../components/Icon.jsx';
-import { Badge, ErrorState, PageHeader, Panel, Spinner, StatusBadge } from '../../components/ui.jsx';
+import { Badge, EmptyState, ErrorState, OccupancyBar, PageHeader, Panel, Spinner, StatusBadge } from '../../components/ui.jsx';
 import { useAuth } from '../../lib/auth.jsx';
 import { useApi } from '../../lib/hooks.js';
 import { formatDateTime } from '../../lib/format.js';
@@ -46,12 +47,18 @@ export default function StudentPortal() {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
   const { data, error, loading, reload } = useApi('/student/me');
+  const { data: scheduleData, error: scheduleError, loading: scheduleLoading, reload: reloadSchedule } =
+    useApi('/student/routes');
 
-  // Live status is worth a gentle refresh without a manual action.
+  // Live status and the route board are worth a gentle refresh without a manual
+  // action — occupancy changes as riders scan on and off.
   useEffect(() => {
-    const timer = setInterval(() => reload({ silent: true }), 20000);
+    const timer = setInterval(() => {
+      reload({ silent: true });
+      reloadSchedule({ silent: true });
+    }, 20000);
     return () => clearInterval(timer);
-  }, [reload]);
+  }, [reload, reloadSchedule]);
 
   const handleSignOut = useCallback(async () => {
     await signOut();
@@ -141,6 +148,122 @@ export default function StudentPortal() {
               />
             </div>
 
+            {/* Live route schedule board — the portal's primary view. Read-only,
+                route-centric: every active route with its shuttle, schedule and stops. */}
+            <Panel
+              title="Live route schedule"
+              subtitle="All campus routes and the shuttle running each one — updated live."
+              icon="route"
+              actions={
+                <Badge tone="accent" dot>
+                  {scheduleData?.routes?.length ?? 0} routes
+                </Badge>
+              }
+            >
+              {scheduleLoading && !scheduleData ? (
+                <div className="flex justify-center py-10">
+                  <Spinner className="h-6 w-6 text-sky-400" />
+                </div>
+              ) : scheduleError ? (
+                <ErrorState error={scheduleError} onRetry={reloadSchedule} />
+              ) : scheduleData?.routes?.length ? (
+                <div className="space-y-3.5">
+                  {scheduleData.routes.map((r) => (
+                    <article key={r.id} className="card p-4">
+                      <header className="flex flex-wrap items-center gap-2">
+                        <span
+                          className="h-3 w-3 shrink-0 rounded-full ring-2 ring-[var(--border-subtle)]"
+                          style={{ backgroundColor: r.color ?? '#38bdf8' }}
+                          aria-hidden="true"
+                        />
+                        <h3 className="font-mono text-[0.8rem] font-bold tracking-wide text-sky-400 uppercase">
+                          {r.code}
+                        </h3>
+                        <p className="min-w-0 flex-1 truncate text-[0.86rem] font-semibold text-mist-100">
+                          {r.name}
+                        </p>
+                        {r.isMine ? <Badge tone="accent">Your route</Badge> : null}
+                        <StatusBadge status="ACTIVE" label="Live" />
+                      </header>
+
+                      <p className="mt-1 text-[0.74rem] text-mist-500">
+                        {r.startPoint} → {r.endPoint}
+                        <span className="mx-1.5 text-mist-600">·</span>
+                        {r.shift}
+                        <span className="mx-1.5 text-mist-600">·</span>
+                        {r.departureTime} – {r.arrivalTime}
+                      </p>
+
+                      <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                        <div>
+                          <p className="mb-1.5 text-[0.68rem] font-semibold tracking-wider text-mist-500 uppercase">
+                            Pickup stops
+                          </p>
+                          {r.stops?.length ? (
+                            <ol className="space-y-1">
+                              {r.stops.map((stop) => (
+                                <li key={stop.sequence} className="flex items-center gap-2 text-[0.8rem] text-mist-300">
+                                  <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-sky-500/12 text-[0.62rem] font-bold text-sky-400">
+                                    {stop.sequence}
+                                  </span>
+                                  <span className="min-w-0 flex-1 truncate">{stop.name}</span>
+                                  {stop.scheduledTime ? (
+                                    <span className="shrink-0 font-mono text-[0.72rem] text-mist-500">
+                                      {stop.scheduledTime}
+                                    </span>
+                                  ) : null}
+                                </li>
+                              ))}
+                            </ol>
+                          ) : (
+                            <p className="text-[0.78rem] text-mist-500">No stops recorded for this route.</p>
+                          )}
+                        </div>
+
+                        <div>
+                          <p className="mb-1.5 text-[0.68rem] font-semibold tracking-wider text-mist-500 uppercase">
+                            Shuttle buses
+                          </p>
+                          {r.buses?.length ? (
+                            <div className="space-y-2.5">
+                              {r.buses.map((b) => (
+                                <div
+                                  key={b.id}
+                                  className="rounded-lg bg-[var(--surface-raised)] px-3 py-2.5 ring-1 ring-[var(--border-subtle)]"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="flex min-w-0 items-center gap-1.5 text-[0.8rem] font-semibold text-mist-100">
+                                      <Icon name="bus" className="h-3.5 w-3.5 shrink-0 text-mist-500" />
+                                      <span className="truncate font-mono">{b.code}</span>
+                                    </p>
+                                    <StatusBadge status={b.status} />
+                                  </div>
+                                  {b.driverName ? (
+                                    <p className="mt-0.5 truncate text-[0.72rem] text-mist-500">
+                                      Driver · {b.driverName}
+                                    </p>
+                                  ) : null}
+                                  <OccupancyBar occupancy={b.occupancy} capacity={b.seatCapacity} className="mt-2" />
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-[0.78rem] text-mist-500">No bus assigned to this route right now.</p>
+                          )}
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <EmptyState
+                  icon="route"
+                  title="No active routes right now"
+                  message="Routes will appear here once the transport office provisions them."
+                />
+              )}
+            </Panel>
+
             <div className="grid gap-5 lg:grid-cols-2">
               <Panel title="Assigned route" subtitle={route ? route.name : 'Not assigned yet'} icon="route">
                 {route ? (
@@ -175,7 +298,7 @@ export default function StudentPortal() {
                   </dl>
                 ) : (
                   <p className="py-6 text-center text-[0.82rem] text-mist-500">
-                    Your route has not been assigned yet. Contact your college transport office.
+                    You are not tied to a single route. Pick any active route from the live schedule above.
                   </p>
                 )}
               </Panel>
@@ -193,7 +316,7 @@ export default function StudentPortal() {
                     </dl>
                   ) : (
                     <p className="py-6 text-center text-[0.82rem] text-mist-500">
-                      No bus is assigned to your route right now.
+                      No bus is running your route right now. Check the live schedule for other options.
                     </p>
                   )}
                 </Panel>
