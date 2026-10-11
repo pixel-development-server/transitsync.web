@@ -415,16 +415,17 @@ export default function Login() {
               horizontal segment below takes over under `lg`. */}
           <div className="pointer-events-auto absolute top-32 right-0 z-30 hidden select-none lg:block">
             <div className="relative flex flex-col py-1 pl-1">
-              {/* Sliding white thumb — 42px matches the slot height exactly.
-                  `pl-1` (no right padding) keeps its right edge flush with the
-                  divider. The transition is declared inline so React re-animates
-                  the coordinate change on every audience toggle. */}
+              {/* Sliding white thumb — a single, permanently-mounted element (no
+                  `key`) so React never remounts it and the browser can animate
+                  the transform across toggles. `pl-1` (no right padding) keeps
+                  its right edge flush with the divider. */}
               <div
                 aria-hidden="true"
                 className="absolute left-1 h-[42px] w-[120px] rounded-l-full bg-white shadow-lg"
                 style={{
                   transform: isStudent ? 'translateY(42px)' : 'translateY(0px)',
-                  transition: 'transform 400ms cubic-bezier(0.16, 1, 0.3, 1)',
+                  transition: 'transform 400ms cubic-bezier(0.16, 1, 0.3, 1), background-color 300ms ease',
+                  willChange: 'transform',
                 }}
               />
 
@@ -435,9 +436,11 @@ export default function Login() {
                 disabled={submitting || checking}
                 aria-pressed={!isStudent}
                 aria-label="Sign in as staff"
-                className={`relative z-10 flex h-[42px] w-[120px] items-center justify-center gap-1.5 text-xs font-bold tracking-wider uppercase transition-colors duration-300 ${
-                  !isStudent ? 'text-blue-900' : 'text-white/80 hover:text-white'
-                }`}
+                className="relative z-10 flex h-[42px] w-[120px] items-center justify-center gap-1.5 text-xs font-bold tracking-wider uppercase"
+                style={{
+                  color: !isStudent ? '#1e3a8a' : 'rgba(255, 255, 255, 0.8)',
+                  transition: 'color 300ms ease',
+                }}
               >
                 <Icon name="user" className="h-4 w-4" strokeWidth={2.2} />
                 STAFF
@@ -450,9 +453,11 @@ export default function Login() {
                 disabled={submitting || checking}
                 aria-pressed={isStudent}
                 aria-label="Sign in as student"
-                className={`relative z-10 flex h-[42px] w-[120px] items-center justify-center gap-1.5 text-xs font-bold tracking-wider uppercase transition-colors duration-300 ${
-                  isStudent ? 'text-blue-900' : 'text-white/80 hover:text-white'
-                }`}
+                className="relative z-10 flex h-[42px] w-[120px] items-center justify-center gap-1.5 text-xs font-bold tracking-wider uppercase"
+                style={{
+                  color: isStudent ? '#1e3a8a' : 'rgba(255, 255, 255, 0.8)',
+                  transition: 'color 300ms ease',
+                }}
               >
                 <Icon name="graduationCap" className="h-4 w-4" strokeWidth={2.2} />
                 STUDENT
