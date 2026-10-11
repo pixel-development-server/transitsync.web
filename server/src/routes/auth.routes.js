@@ -152,14 +152,20 @@ function setAuthCookie(req, res, token, expiresAt) {
   });
 }
 
+/**
+ * "Initialised" means a master account exists that can sign in. In a
+ * multi-tenant deployment that is either the campus System Administrator or the
+ * Level 200 Platform Super Administrator — if the latter exists, the first-run
+ * wizard is skipped and campus admins arrive via college provisioning instead.
+ */
 function systemIsBootstrapped(db) {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n FROM users u
          JOIN roles r ON r.id = u.role_id
-        WHERE r.key = ?`,
+        WHERE r.key IN (?, ?)`,
     )
-    .get(ROLE_KEYS.SYSTEM_ADMIN);
+    .get(ROLE_KEYS.SYSTEM_ADMIN, ROLE_KEYS.SUPER_ADMIN);
   return row.n > 0;
 }
 

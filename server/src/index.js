@@ -48,9 +48,9 @@ function bootstrap() {
     .prepare(
       `SELECT COUNT(*) AS n FROM users u
          JOIN roles r ON r.id = u.role_id
-        WHERE r.key = ?`,
+        WHERE r.key IN (?, ?)`,
     )
-    .get(ROLE_KEYS.SYSTEM_ADMIN);
+    .get(ROLE_KEYS.SYSTEM_ADMIN, ROLE_KEYS.SUPER_ADMIN);
   const needsSetup = admin.n === 0;
 
   return { db, needsSetup };
