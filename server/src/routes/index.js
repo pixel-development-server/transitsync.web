@@ -15,6 +15,7 @@ import settingsRoutes from './settings.routes.js';
 import adminRoutes from './admin.routes.js';
 import systemRoutes from './system.routes.js';
 import superAdminRoutes from './superadmin.routes.js';
+import studentPortalRoutes from './student.routes.js';
 import { getDb } from '../db/connection.js';
 import { hub } from '../services/realtime.js';
 
@@ -88,5 +89,7 @@ router.use('/system', settingsRoutes);
 router.use('/admin', adminRoutes);
 // Platform Master — exclusive to the Level 200 Super Administrator.
 router.use('/super-admin', superAdminRoutes);
+// Rider portal — exclusive to the Level 1 `student` role.
+router.use('/student', studentPortalRoutes);
 
 export default router;

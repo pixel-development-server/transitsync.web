@@ -125,6 +125,21 @@ export function requireSuperAdmin(req, res, next) {
 }
 
 /**
+ * Rider-portal gate: only a Level 1 `student` principal may pass. The portal is
+ * gated by role rather than permission because a student intentionally holds no
+ * staff permissions at all.
+ */
+export function requireStudent(req, res, next) {
+  if (!req.user) return next(unauthorized());
+  if (req.user.role_key === 'student') return next();
+  return next(
+    forbidden('This portal is reserved for students.', {
+      code: 'STUDENT_ONLY',
+    }),
+  );
+}
+
+/**
  * The Global Emergency Lockout switch (settings key `system.lockdown`).
  * While engaged, every non-System-Administrator session is frozen.
  */
@@ -146,6 +161,7 @@ export default {
   requirePasswordRotated,
   requireSystemAdmin,
   requireSuperAdmin,
+  requireStudent,
   isLockedOut,
   extractToken,
 };

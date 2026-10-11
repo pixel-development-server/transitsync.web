@@ -17,6 +17,8 @@ import {
   loginSchema,
   checkEmailSchema,
   setFirstPasswordSchema,
+  studentCheckEmailSchema,
+  studentRegisterSchema,
   setupSchema,
   changePasswordSchema,
   updateProfileSchema,
@@ -486,6 +488,188 @@ router.post(
     });
 
     const user = loadUserForAuth(db, row.id);
+    const session = createSession(db, user, req, { remember: false });
+    setAuthCookie(req, res, session.token, session.expiresAt);
+
+    res.status(201).json({
+      success: true,
+      data: {
+        token: session.token,
+        expiresAt: session.expiresAt,
+        sessionId: session.sessionId,
+        mustChangePassword: false,
+        user: publicUser(user),
+      },
+    });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Pre-authorized student access portal
+//
+// A student is *pre-authorized* by the college: a staff member places a roster
+// row carrying the student's email. These two public endpoints let that student
+// claim the row with a password of their own, then sign in. They mirror the
+// staff two-step flow but read the `students` roster instead of `users`.
+// ---------------------------------------------------------------------------
+
+/** Step 1: is this a known student, and have they set a password yet? */
+router.post(
+  '/student-check-email',
+  probeLimiter,
+  validate(studentCheckEmailSchema),
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    const { email } = req.body;
+    const ip = clientIp(req);
+
+    // Maintenance refuses campus sign-ins, and a student is a campus sign-in.
+    const maintenance = getMaintenance(db);
+    if (maintenance.isMaintenanceMode) throw maintenanceMode(maintenance.message);
+
+    const student = db
+      .prepare(
+        `SELECT s.id, s.full_name, s.status, s.is_claimed,
+                i.name AS college_name, i.status AS college_status
+           FROM students s LEFT JOIN institutions i ON i.id = s.tenant_id
+          WHERE LOWER(s.email) = ?`,
+      )
+      .get(email);
+
+    if (!student) {
+      throw new AppError(404, 'No student record found with this email address. Contact your college office.', {
+        code: 'NOT_FOUND',
+      });
+    }
+
+    if (student.college_status === 'SUSPENDED') {
+      recordAudit({ actorEmail: email, action: 'auth.student_check_email', ip, status: 'denied' });
+      throw new AppError(403, 'This campus is currently suspended. Contact your college office.', {
+        code: 'COLLEGE_SUSPENDED',
+      });
+    }
+
+    if (String(student.status ?? '').toLowerCase() !== 'active') {
+      recordAudit({ actorEmail: email, action: 'auth.student_check_email', ip, status: 'denied' });
+      throw new AppError(403, 'This rider pass is no longer active. Contact your college office.', {
+        code: 'STUDENT_INACTIVE',
+      });
+    }
+
+    const firstTime = !Number(student.is_claimed);
+
+    return res.json({
+      success: true,
+      data: {
+        status: firstTime ? 'FIRST_TIME_USER' : 'EXISTS_WITH_PASSWORD',
+        exists: true,
+        email,
+        name: student.full_name,
+        college: student.college_name ?? null,
+        kind: 'student',
+        message: firstTime ? 'Create a password to activate your rider pass.' : undefined,
+      },
+    });
+  }),
+);
+
+/**
+ * Step 2: the pre-authorized student claims the roster row by choosing their
+ * password. This creates the paired `users` account (role `student`, level 1),
+ * links it back onto the roster row and marks the row claimed.
+ *
+ * Security posture: reachable only for an active, unclaimed roster row on campus
+ * + email, rate-limited, policy-checked and audited. Knowing a student's email
+ * is the pre-authorization the college granted by adding them to the roster.
+ */
+router.post(
+  '/student-register',
+  probeLimiter,
+  validate(studentRegisterSchema),
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    const { email, password } = req.body;
+    const ip = clientIp(req);
+
+    const student = db
+      .prepare(
+        `SELECT s.*, i.status AS college_status
+           FROM students s LEFT JOIN institutions i ON i.id = s.tenant_id
+          WHERE LOWER(s.email) = ?`,
+      )
+      .get(email);
+
+    if (!student) {
+      recordAudit({ actorEmail: email, action: 'auth.student_register', ip, status: 'failure' });
+      throw new AppError(404, 'No student record found with this email address. Contact your college office.', {
+        code: 'NOT_FOUND',
+      });
+    }
+
+    if (student.college_status === 'SUSPENDED') {
+      throw new AppError(403, 'This campus is currently suspended. Contact your college office.', {
+        code: 'COLLEGE_SUSPENDED',
+      });
+    }
+
+    if (String(student.status ?? '').toLowerCase() !== 'active') {
+      throw new AppError(403, 'This rider pass is no longer active. Contact your college office.', {
+        code: 'STUDENT_INACTIVE',
+      });
+    }
+
+    if (Number(student.is_claimed) || student.user_id) {
+      throw conflict('This student account is already active. Sign in instead.');
+    }
+
+    const maintenance = getMaintenance(db);
+    if (maintenance.isMaintenanceMode) throw maintenanceMode(maintenance.message);
+
+    if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) {
+      throw conflict('That email address is already in use. Sign in instead.');
+    }
+
+    const policy = checkPasswordPolicy(password, { email, fullName: student.full_name });
+    if (!policy.valid) {
+      throw unprocessable(
+        'Password does not meet the policy.',
+        policy.errors.map((message) => ({ field: 'password', message })),
+      );
+    }
+
+    const role = db.prepare('SELECT id FROM roles WHERE key = ?').get(ROLE_KEYS.STUDENT);
+    if (!role) throw unprocessable('The Student role is not installed.');
+
+    const passwordHash = await hashPassword(password);
+
+    const userId = db.transaction(() => {
+      const result = db
+        .prepare(
+          `INSERT INTO users
+             (email, full_name, password_hash, job_title, department, role_id, status,
+              tenant_id, is_first_login, password_changed, force_password_reset, permissions_mode)
+           VALUES (?, ?, ?, 'Student', 'Student Body', ?, 'active', ?, 0, 1, 0, 'INHERIT')`,
+        )
+        .run(email, student.full_name, passwordHash, role.id, student.tenant_id);
+      const id = Number(result.lastInsertRowid);
+
+      db.prepare(
+        "UPDATE students SET user_id = ?, is_claimed = 1, updated_at = datetime('now') WHERE id = ?",
+      ).run(id, student.id);
+
+      return id;
+    });
+
+    recordAudit({
+      userId,
+      actorEmail: email,
+      action: 'auth.student_register',
+      entity: 'user',
+      entityId: userId,
+      ip,
+    });
+
+    const user = loadUserForAuth(db, userId);
     const session = createSession(db, user, req, { remember: false });
     setAuthCookie(req, res, session.token, session.expiresAt);
 

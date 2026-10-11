@@ -41,6 +41,27 @@ export const setFirstPasswordSchema = z
     path: ['confirmPassword'],
   });
 
+/**
+ * Portrait of the pre-authorized student sign-in.
+ *
+ * Step 1 matches a roster row by campus + email. Step 2 lets the pre-authorized
+ * student choose their own password, which is what claims the account.
+ */
+export const studentCheckEmailSchema = z.object({
+  email: z.string().trim().toLowerCase().email('Enter a valid email address'),
+});
+
+export const studentRegisterSchema = z
+  .object({
+    email: z.string().trim().toLowerCase().email('Enter a valid email address'),
+    password: z.string().min(1, 'Password is required'),
+    confirmPassword: z.string(),
+  })
+  .refine((data) => data.password === data.confirmPassword, {
+    message: 'Passwords do not match',
+    path: ['confirmPassword'],
+  });
+
 export const setupSchema = z.object({
   email: z.string().trim().toLowerCase().email('Enter a valid email address'),
   password: z.string().min(10, 'Use at least 10 characters'),
@@ -389,6 +410,8 @@ export const schemas = {
   loginSchema,
   checkEmailSchema,
   setFirstPasswordSchema,
+  studentCheckEmailSchema,
+  studentRegisterSchema,
   setupSchema,
   changePasswordSchema,
   updateProfileSchema,

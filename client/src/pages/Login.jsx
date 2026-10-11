@@ -89,6 +89,9 @@ export default function Login() {
   const [step, setStep] = useState('email'); // 'email' | 'password' | 'setup'
   // Entrance direction for the animated step swap: forward slides from the right.
   const [slide, setSlide] = useState('right');
+  // Who is signing in: operations staff, or a pre-authorized student rider.
+  const [audience, setAudience] = useState('staff'); // 'staff' | 'student'
+  const isStudent = audience === 'student';
 
   // The setup wizard stashes the email it just created in sessionStorage; read
   // it once and clear it so returning visitors get a blank field.
@@ -183,6 +186,21 @@ export default function Login() {
     setConfirmPassword('');
   };
 
+  /** Switch between the staff console and the student rider portal. */
+  const switchAudience = (next) => {
+    if (next === audience) return;
+    setAudience(next);
+    setSlide('left');
+    setStep('email');
+    setError(null);
+    setEmailError(null);
+    setForgotHint(false);
+    setShowPassword(false);
+    setShowConfirmPassword(false);
+    setPassword('');
+    setConfirmPassword('');
+  };
+
   const onCheckEmail = async (event) => {
     event.preventDefault();
     setEmailError(null);
@@ -194,12 +212,19 @@ export default function Login() {
 
     setChecking(true);
     try {
-      const response = await api.post('/auth/check-email', { email: value });
+      const response = await api.post(
+        isStudent ? '/auth/student-check-email' : '/auth/check-email',
+        { email: value },
+      );
       const status = response.data?.status;
 
       // Defensive only: a server that answers 200 with a NOT_FOUND discriminator.
       if (status === 'NOT_FOUND') {
-        setEmailError('No staff account found with this email address.');
+        setEmailError(
+          isStudent
+            ? 'No student record found with this email address.'
+            : 'No staff account found with this email address.',
+        );
         return;
       }
 
@@ -213,7 +238,7 @@ export default function Login() {
       // A 404 (no such account) or 403 (suspended) is an ordinary Step-1
       // outcome, not a transport failure — surface the server's message inline.
       const message = caught?.message || 'We could not verify that address. Please try again.';
-      if (caught?.code === 'ACCOUNT_SUSPENDED') {
+      if (['ACCOUNT_SUSPENDED', 'COLLEGE_SUSPENDED', 'STUDENT_INACTIVE'].includes(caught?.code)) {
         setError({ message });
       } else {
         setEmailError(message);
@@ -231,7 +256,7 @@ export default function Login() {
     setSubmitting(true);
     try {
       await signIn(email, password, rememberMe);
-      navigate('/', { replace: true });
+      navigate(isStudent ? '/student/dashboard' : '/', { replace: true });
     } catch (caught) {
       setError(caught);
       setPassword('');
@@ -259,10 +284,16 @@ export default function Login() {
 
     setSubmitting(true);
     try {
-      const response = await api.post('/auth/set-first-password', { email, password, confirmPassword });
+      const response = await api.post(
+        isStudent ? '/auth/student-register' : '/auth/set-first-password',
+        { email, password, confirmPassword },
+      );
       await establishSession(response.data);
-      toast.success('Your password is set. Welcome aboard.', { title: 'Account activated' });
-      navigate('/', { replace: true });
+      toast.success(
+        isStudent ? 'Your rider pass is active. Welcome aboard.' : 'Your password is set. Welcome aboard.',
+        { title: isStudent ? 'Rider pass activated' : 'Account activated' },
+      );
+      navigate(isStudent ? '/student/dashboard' : '/', { replace: true });
     } catch (caught) {
       setError(caught);
     } finally {
@@ -366,22 +397,60 @@ export default function Login() {
         <section className="flex h-full flex-col bg-white md:col-span-7">
           <div className="flex flex-1 items-center justify-center px-8 md:px-20">
             <div className="w-full max-w-md">
+              {/* Audience switch: staff console vs. student rider portal. */}
+              <div className="mb-6 flex justify-center">
+                <div
+                  role="tablist"
+                  aria-label="Sign-in type"
+                  className="inline-flex rounded-full border border-slate-200 bg-slate-50 p-1"
+                >
+                  {[
+                    { key: 'staff', label: 'Staff', icon: 'users' },
+                    { key: 'student', label: 'Student', icon: 'students' },
+                  ].map((option) => (
+                    <button
+                      key={option.key}
+                      type="button"
+                      role="tab"
+                      aria-selected={audience === option.key}
+                      onClick={() => switchAudience(option.key)}
+                      disabled={submitting || checking}
+                      className={`flex items-center gap-1.5 rounded-full px-4 py-1.5 text-[0.8rem] font-semibold transition ${audience === option.key
+                          ? 'bg-white text-blue-700 shadow-sm'
+                          : 'text-slate-500 hover:text-slate-700'
+                        }`}
+                    >
+                      <Icon name={option.icon} className="h-3.5 w-3.5" />
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border border-slate-100 bg-white text-blue-700 shadow-md">
                 <Icon
-                  name={step === 'email' ? 'user' : step === 'setup' ? 'key' : 'lock'}
+                  name={step === 'email' ? (isStudent ? 'students' : 'user') : step === 'setup' ? 'key' : 'lock'}
                   className="h-7 w-7"
                   strokeWidth={2}
                 />
               </div>
 
               <h1 className="mt-5 text-center text-3xl font-extrabold tracking-tight text-slate-900">
-                {step === 'email' ? 'Login' : step === 'setup' ? 'Set your password' : 'Welcome back'}
+                {step === 'email'
+                  ? (isStudent ? 'Student sign in' : 'Login')
+                  : step === 'setup'
+                    ? (isStudent ? 'Activate your pass' : 'Set your password')
+                    : 'Welcome back'}
               </h1>
               <p className="mt-1 mb-6 text-center text-sm text-slate-500">
                 {step === 'email'
-                  ? `Sign in to the ${institutionName} shuttle operations console.`
+                  ? (isStudent
+                      ? `Access your route, bus and live shuttle status at ${institutionName}.`
+                      : `Sign in to the ${institutionName} shuttle operations console.`)
                   : step === 'setup'
-                    ? 'First time here? Create the password you will use from now on.'
+                    ? (isStudent
+                        ? 'Create the password you will use to reach your rider dashboard.'
+                        : 'First time here? Create the password you will use from now on.')
                     : `Enter your password to continue to ${institutionName}.`}
               </p>
 
@@ -465,7 +534,7 @@ export default function Login() {
                         type="email"
                         name="email"
                         autoComplete="username"
-                        placeholder="you@transitsync.edu.np"
+                        placeholder={isStudent ? 'you@student.edu.np' : 'you@transitsync.edu.np'}
                         value={email}
                         onChange={(event) => {
                           setEmail(event.target.value);
@@ -531,7 +600,7 @@ export default function Login() {
                           <Icon name="shield" className="mt-px h-4 w-4 shrink-0 text-blue-600" />
                           <p>
                             <span className="font-semibold">First-time setup:</span> Please create a
-                            secure password for your staff account.
+                            secure password for your {isStudent ? 'student' : 'staff'} account.
                           </p>
                         </div>
 
@@ -669,8 +738,9 @@ export default function Login() {
 
                         {forgotHint ? (
                           <p className="rounded-lg bg-slate-50 px-3 py-2 text-[0.72rem] leading-relaxed text-slate-500 ring-1 ring-slate-900/5">
-                            Password resets are handled by your transport administrator. Contact the
-                            Department of Transport &amp; Resource Management.
+                            {isStudent
+                              ? 'Password resets are handled by your college transport office. Contact them with your student ID.'
+                              : 'Password resets are handled by your transport administrator. Contact the Department of Transport & Resource Management.'}
                           </p>
                         ) : null}
 
@@ -689,7 +759,9 @@ export default function Login() {
               </div>
 
               <p className="mt-3 text-center text-xs text-slate-400">
-                Authorised staff only. All access is logged and audited under system policy.
+                {isStudent
+                  ? 'Read-only rider access. Activity is logged for campus transport records.'
+                  : 'Authorised staff only. All access is logged and audited under system policy.'}
               </p>
             </div>
           </div>
