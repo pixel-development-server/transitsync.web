@@ -5,7 +5,7 @@ import { Icon } from '../components/Icon.jsx';
 import { FormError, Input, Checkbox } from '../components/form.jsx';
 import { Spinner } from '../components/ui.jsx';
 import { PasswordRules } from './Login.jsx';
-import { api } from '../lib/api.js';
+import { api, setToken } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
 import { useToast } from '../lib/toast.jsx';
 
@@ -46,12 +46,18 @@ export default function ChangePassword() {
 
     setSubmitting(true);
     try {
-      await api.post('/auth/change-password', {
+      const response = await api.post('/auth/change-password', {
         currentPassword,
         newPassword,
         confirmPassword,
         revokeOtherSessions,
       });
+
+      // The rotation bumps the user's token_version server-side, which
+      // invalidates the JWT we logged in with. Adopt the fresh token carried by
+      // the response so the /me probe below (and everything after) keeps
+      // authenticating instead of bouncing back to /login.
+      if (response?.data?.token) setToken(response.data.token);
 
       // The rotation response carries a fresh token; re-read /me so the app
       // picks up the cleared gate flag and the new permission set.

@@ -39,7 +39,7 @@ export function Field({ label, hint, error, required, children, htmlFor, classNa
 }
 
 export const Input = forwardRef(function Input(
-  { label, hint, error, required, icon, suffix, className = '', wrapperClass = '', ...props },
+  { label, hint, error, required, icon, suffix, children, className = '', wrapperClass = '', ...props },
   ref,
 ) {
   const id = useId();
@@ -65,6 +65,7 @@ export const Input = forwardRef(function Input(
           <span className="absolute top-1/2 right-2.5 -translate-y-1/2 text-mist-500">{suffix}</span>
         ) : null}
       </div>
+      {children}
     </Field>
   );
 });
