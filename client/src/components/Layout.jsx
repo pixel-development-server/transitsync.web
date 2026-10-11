@@ -19,6 +19,7 @@ import { NAV_SECTIONS, canSeeNavItem } from '../lib/nav.js';
 import { initials } from '../lib/format.js';
 
 const THEME_KEY = 'transitsync.theme';
+const SIDEBAR_KEY = 'transitsync.sidebar.collapsed';
 
 function useTheme() {
   const [theme, setTheme] = useState(() => {
@@ -74,6 +75,16 @@ export default function Layout() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [globalQuery, setGlobalQuery] = useState('');
 
+  // Desktop-only icon rail. The drawer below `lg` is unaffected — every
+  // collapsed style is `lg:`-scoped so a phone always shows full labels.
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(SIDEBAR_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+
   const menuRef = useDismissable(() => setMenuOpen(false));
 
   // Close the mobile drawer whenever the route changes.
@@ -92,6 +103,15 @@ export default function Layout() {
       document.body.style.overflow = previous;
     };
   }, [sidebarOpen]);
+
+  // Remember the rail preference across reloads.
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }, [collapsed]);
 
   // A new alert changes the sidebar badge. The reload handle is held in a ref so
   // the stream callback can stay referentially stable and never tear down the
@@ -151,15 +171,19 @@ export default function Layout() {
       ) : null}
 
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-60 flex-col border-r border-[var(--border-subtle)] bg-[var(--glass-fill-strong)] backdrop-blur-xl transition-transform pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] lg:static lg:translate-x-0 ${
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
-        }`}
+        className={`fixed inset-y-0 left-0 z-40 flex w-60 flex-col border-r border-[var(--border-subtle)] bg-[var(--glass-fill-strong)] backdrop-blur-xl transition-all duration-300 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] lg:static lg:translate-x-0 ${
+          collapsed ? 'lg:w-20' : 'lg:w-64'
+        } ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
       >
-        <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-[var(--border-subtle)] px-4">
-          <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-600 text-white shadow-lg shadow-brand-600/25">
+        <div
+          className={`flex h-14 shrink-0 items-center border-b border-[var(--border-subtle)] ${
+            collapsed ? 'gap-2.5 px-4 lg:gap-1 lg:px-2' : 'gap-2.5 px-4'
+          }`}
+        >
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-brand-600 text-white shadow-lg shadow-brand-600/25">
             <Icon name="bus" className="h-4.5 w-4.5" strokeWidth={2} />
           </span>
-          <div className="min-w-0">
+          <div className={`min-w-0 ${collapsed ? 'lg:hidden' : ''}`}>
             <p className="truncate text-[0.9rem] leading-tight font-extrabold tracking-tight text-mist-100">
               TransitSync
             </p>
@@ -175,12 +199,26 @@ export default function Layout() {
           >
             <Icon name="close" className="h-4 w-4" />
           </button>
+          {/* Desktop rail toggle: collapse to icons, expand to labels. */}
+          <button
+            type="button"
+            className="btn btn-ghost ml-auto hidden !p-1.5 lg:inline-flex"
+            onClick={() => setCollapsed((current) => !current)}
+            aria-label={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+            title={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+          >
+            <Icon name={collapsed ? 'chevronRight' : 'chevronLeft'} className="h-4 w-4" />
+          </button>
         </div>
 
         <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-4" aria-label="Main navigation">
           {visibleSections.map((section) => (
             <div key={section.label}>
-              <p className="mb-1.5 px-2 text-[0.63rem] font-bold tracking-[0.1em] text-mist-500 uppercase">
+              <p
+                className={`mb-1.5 px-2 text-[0.63rem] font-bold tracking-[0.1em] text-mist-500 uppercase ${
+                  collapsed ? 'lg:hidden' : ''
+                }`}
+              >
                 {section.label}
               </p>
               <ul className="space-y-0.5">
@@ -189,8 +227,11 @@ export default function Layout() {
                     <NavLink
                       to={item.to}
                       end={item.end}
+                      title={collapsed ? item.label : undefined}
                       className={({ isActive }) =>
-                        `group flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-[0.83rem] transition ${
+                        `group relative flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-[0.83rem] transition ${
+                          collapsed ? 'lg:justify-center lg:px-2' : ''
+                        } ${
                           isActive
                             ? 'bg-brand-500/10 font-semibold text-brand-500'
                             : 'font-medium text-mist-400 hover:bg-brand-500/[0.06] hover:text-mist-100'
@@ -203,11 +244,20 @@ export default function Layout() {
                             name={item.icon}
                             className={`h-4 w-4 shrink-0 ${isActive ? 'text-brand-500' : 'text-mist-500 group-hover:text-mist-300'}`}
                           />
-                          <span className="flex-1 truncate">{item.label}</span>
+                          <span className={`flex-1 truncate ${collapsed ? 'lg:hidden' : ''}`}>
+                            {item.label}
+                          </span>
                           {item.badge === 'alerts' && openAlerts > 0 ? (
-                            <Badge tone="bad" className="tabular">
+                            <Badge tone="bad" className={`tabular ${collapsed ? 'lg:hidden' : ''}`}>
                               {openAlerts > 99 ? '99+' : openAlerts}
                             </Badge>
+                          ) : null}
+                          {/* In the icon rail the count is replaced by a dot. */}
+                          {collapsed && item.badge === 'alerts' && openAlerts > 0 ? (
+                            <span
+                              className="absolute top-1.5 right-1.5 hidden h-1.5 w-1.5 rounded-full bg-red-500 lg:block"
+                              aria-hidden="true"
+                            />
                           ) : null}
                         </>
                       )}
@@ -220,7 +270,11 @@ export default function Layout() {
         </nav>
 
         <div className="shrink-0 border-t border-[var(--border-subtle)] px-3 py-3">
-          <div className="mb-2 flex items-center justify-between px-2">
+          <div
+            className={`flex items-center justify-between px-2 ${
+              collapsed ? 'mb-2 lg:mb-0 lg:flex-col lg:gap-2 lg:px-0' : 'mb-2'
+            }`}
+          >
             <LiveIndicator status={streamStatus} />
             <button
               type="button"
@@ -232,7 +286,7 @@ export default function Layout() {
               <Icon name={theme === 'dark' ? 'sun' : 'moon'} className="h-3.5 w-3.5" />
             </button>
           </div>
-          <p className="px-2 text-[0.63rem] leading-relaxed text-mist-500">
+          <p className={`px-2 text-[0.63rem] leading-relaxed text-mist-500 ${collapsed ? 'lg:hidden' : ''}`}>
             v1.0.0 · SQLite · SSE
           </p>
         </div>
