@@ -626,8 +626,8 @@ export default function Users() {
                 setEditing(row);
                 setDialogOpen(true);
               }}
-              aria-label={`Edit ${row.fullName}`}
-              title="Edit"
+              aria-label={`Edit user ${row.fullName}`}
+              title="Edit user"
             >
               <Icon name="edit" className="h-3.5 w-3.5" />
             </button>
@@ -637,8 +637,8 @@ export default function Users() {
               type="button"
               className="btn btn-ghost !p-1.5"
               onClick={() => setResetting(row)}
-              aria-label={`Force password reset for ${row.fullName}`}
-              title="Force password reset"
+              aria-label={`Reset password for ${row.fullName}`}
+              title="Reset password"
             >
               <Icon name="key" className="h-3.5 w-3.5" />
             </button>
@@ -661,10 +661,10 @@ export default function Users() {
               onClick={() => setDeleting(row)}
               aria-label={
                 row.status === 'suspended'
-                  ? `Delete ${row.fullName} permanently`
-                  : `Delete ${row.fullName}`
+                  ? `Delete account ${row.fullName} permanently`
+                  : `Delete account ${row.fullName}`
               }
-              title={row.status === 'suspended' ? 'Delete permanently' : 'Delete'}
+              title={row.status === 'suspended' ? 'Delete account permanently' : 'Delete account'}
             >
               <Icon name="trash" className="h-3.5 w-3.5" />
             </button>
