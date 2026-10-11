@@ -69,9 +69,11 @@ export function resolvePermissions(db, user) {
 export function loadUserForAuth(db, userId) {
   const user = db
     .prepare(
-      `SELECT u.*, r.key AS role_key, r.name AS role_name, r.level AS role_level
+      `SELECT u.*, r.key AS role_key, r.name AS role_name, r.level AS role_level,
+              i.name AS institution_name
          FROM users u
          LEFT JOIN roles r ON r.id = u.role_id
+         LEFT JOIN institutions i ON i.id = u.tenant_id
         WHERE u.id = ?`,
     )
     .get(userId);

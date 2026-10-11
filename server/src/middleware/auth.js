@@ -1,9 +1,10 @@
 import config from '../config/env.js';
 import { getDb } from '../db/connection.js';
 import { verifyAccessToken } from '../lib/tokens.js';
-import { unauthorized, forbidden, passwordChangeRequired, serviceLocked } from '../lib/errors.js';
+import { unauthorized, forbidden, passwordChangeRequired, serviceLocked, maintenanceMode } from '../lib/errors.js';
 import { isExpired } from '../lib/time.js';
 import { loadUserForAuth, requiresPasswordChange } from '../services/permissions.js';
+import { getInstitutionMaintenance, isExemptFromInstitutionMaintenance, institutionMaintenanceRejection } from '../services/maintenance.js';
 import { SUPER_ADMIN_LEVEL } from '../db/permissions.js';
 
 /**
@@ -68,6 +69,17 @@ export function authenticate(req, res, next) {
 
   if (isLockedOut(user)) {
     return next(serviceLocked());
+  }
+
+  // Tenant-scoped maintenance gate (migration 008). When the user's own campus
+  // is under maintenance, their session is frozen with a 503 — unless they are
+  // the Level 200 platform owner or that campus's own Level 100 System
+  // Administrator, who must stay in to manage the window and switch it off.
+  // Other institutions are completely unaffected: the check only ever looks at
+  // the requester's own tenant_id.
+  const campusMaintenance = user.tenant_id ? getInstitutionMaintenance(db, user.tenant_id) : null;
+  if (campusMaintenance?.isMaintenanceMode && !isExemptFromInstitutionMaintenance(user, campusMaintenance)) {
+    return next(maintenanceMode(institutionMaintenanceRejection(campusMaintenance)));
   }
 
   req.user = user;

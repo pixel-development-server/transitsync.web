@@ -56,6 +56,25 @@ function FullPageSpinner() {
   );
 }
 
+/**
+ * Dynamic document title: generic "TransitSync — Campus Shuttle Operations
+ * Console" while no authenticated user is present; once a user signs in and
+ * their campus name is loaded, the brand reflects that institution
+ * (e.g. "TransitSync — Everest College").
+ */
+function DocumentTitle() {
+  const { user } = useAuth();
+
+  useEffect(() => {
+    const institution = user?.institutionName?.trim();
+    document.title = institution
+      ? `TransitSync — ${institution}`
+      : 'TransitSync — Campus Shuttle Operations Console';
+  }, [user]);
+
+  return null;
+}
+
 function PageFallback() {
   return (
     <div className="grid min-h-[60vh] place-items-center">
@@ -325,6 +344,7 @@ export default function App() {
       <ToastProvider>
         <AuthProvider>
           <SessionTimeout />
+          <DocumentTitle />
           <SetupGate>
             <AppRoutes />
           </SetupGate>

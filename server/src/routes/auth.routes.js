@@ -11,7 +11,12 @@ import { parseSqliteDate, parseDurationMs } from '../lib/time.js';
 import { requireAuth } from '../middleware/auth.js';
 import { loadUserForAuth, requiresPasswordChange } from '../services/permissions.js';
 import { recordAudit, clientIp } from '../services/audit.js';
-import { getMaintenance } from '../services/maintenance.js';
+import {
+  getMaintenance,
+  getInstitutionMaintenance,
+  isExemptFromInstitutionMaintenance,
+  institutionMaintenanceRejection,
+} from '../services/maintenance.js';
 import { ROLE_KEYS, SUPER_ADMIN_LEVEL } from '../db/permissions.js';
 import {
   loginSchema,
@@ -79,6 +84,8 @@ function publicUser(user, extras = {}) {
     role: user.role_key ?? null,
     roleName: user.role_name ?? null,
     roleLevel: user.role_level ?? null,
+    institutionName: user.institution_name ?? null,
+    tenantId: user.tenant_id ?? null,
     permissions: user.permissions ?? [],
     permissionsMode: user.permissions_mode ?? 'INHERIT',
     isFirstLogin: Boolean(user.is_first_login),
@@ -299,19 +306,38 @@ router.post(
 
     if (!row) fail('Incorrect email or password.');
 
-    // Global maintenance mode refuses every campus sign-in (role level 1–100).
-    // The Level 200 Super Administrator is the single bypass, so it can get in
-    // to disengage the mode. Checked before the password so a locked platform
+    // Maintenance gates — checked before the password so a locked platform
     // leaks nothing about credential validity.
+    //
+    // 1) Global maintenance (platform-wide switch in `settings`) refuses every
+    //    campus sign-in (role level 1–100); only the Level 200 Super
+    //    Administrator bypasses, so the platform owner can disengage it.
+    // 2) Institution maintenance is tenant-scoped: only sign-ins whose own
+    //    campus (`institutions.is_maintenance_mode`) is under maintenance are
+    //    refused — every other institution is completely unaffected. That
+    //    campus's own Level 100 System Administrator is exempt so they can log
+    //    in and turn the switch back off, as is the Level 200 Super Admin.
     const maintenance = getMaintenance(db);
-    if (maintenance.isMaintenanceMode) {
-      const level = row.role_id
-        ? db.prepare('SELECT level FROM roles WHERE id = ?').get(row.role_id)?.level ?? 0
-        : 0;
-      if (level < SUPER_ADMIN_LEVEL) {
-        recordAudit({ userId: row.id, actorEmail: email, action: 'auth.login', ip, status: 'maintenance' });
-        throw maintenanceMode(maintenance.message);
-      }
+    const role = row.role_id
+      ? db.prepare('SELECT level, key FROM roles WHERE id = ?').get(row.role_id)
+      : null;
+    const level = role?.level ?? 0;
+
+    if (maintenance.isMaintenanceMode && level < SUPER_ADMIN_LEVEL) {
+      recordAudit({ userId: row.id, actorEmail: email, action: 'auth.login', ip, status: 'maintenance' });
+      throw maintenanceMode(maintenance.message);
+    }
+
+    const campusMaintenance = getInstitutionMaintenance(db, row.tenant_id);
+    if (
+      campusMaintenance?.isMaintenanceMode &&
+      !isExemptFromInstitutionMaintenance(
+        { role_key: role?.key, role_level: level, tenant_id: row.tenant_id },
+        campusMaintenance,
+      )
+    ) {
+      recordAudit({ userId: row.id, actorEmail: email, action: 'auth.login', ip, status: 'maintenance' });
+      throw maintenanceMode(institutionMaintenanceRejection(campusMaintenance));
     }
 
     const lockedUntil = parseSqliteDate(row.locked_until);
@@ -535,7 +561,7 @@ router.post(
 
     const student = db
       .prepare(
-        `SELECT s.id, s.full_name, s.status, s.is_claimed,
+        `SELECT s.id, s.full_name, s.status, s.is_claimed, s.tenant_id,
                 i.name AS college_name, i.status AS college_status
            FROM students s LEFT JOIN institutions i ON i.id = s.tenant_id
           WHERE LOWER(s.email) = ?`,
@@ -546,6 +572,15 @@ router.post(
       throw new AppError(404, 'No student record found with this email address. Contact your college office.', {
         code: 'NOT_FOUND',
       });
+    }
+
+    // Tenant-scoped maintenance: a campus under maintenance refuses its own
+    // students too — the campus System Administrator is the exemption that can
+    // log in and switch it back off.
+    const campusMaintenance = getInstitutionMaintenance(db, student.tenant_id);
+    if (campusMaintenance?.isMaintenanceMode) {
+      recordAudit({ actorEmail: email, action: 'auth.student_check_email', ip, status: 'maintenance' });
+      throw maintenanceMode(institutionMaintenanceRejection(campusMaintenance));
     }
 
     if (student.college_status === 'SUSPENDED') {
@@ -630,6 +665,11 @@ router.post(
 
     const maintenance = getMaintenance(db);
     if (maintenance.isMaintenanceMode) throw maintenanceMode(maintenance.message);
+
+    // Tenant-scoped maintenance: the campus's own switch refuses its students
+    // too (the campus System Administrator is the exemption).
+    const campusMaintenance = getInstitutionMaintenance(db, student.tenant_id);
+    if (campusMaintenance?.isMaintenanceMode) throw maintenanceMode(institutionMaintenanceRejection(campusMaintenance));
 
     if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) {
       throw conflict('That email address is already in use. Sign in instead.');

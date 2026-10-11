@@ -17,14 +17,20 @@ const FEATURES = [
 
 /**
  * One-slot geometry for the Staff/Student morphing notch (viewBox 0 0 132 40).
- * The white pill rows flush against the blue/white boundary at x=132; the blue
- * panel curves into the pill's top-left and bottom-left fillets so the active
- * tab reads as a cut-out notch, exactly like the old static "Login" tab.
+ *
+ * The white pill is a capsule with a fully rounded LEFT cap (`rounded-l-full`:
+ * `border-radius: 9999px 0 0 9999px`) so its left edge is never clipped or cut
+ * off inside the blue panel. At the right edge — where the pill meets the
+ * blue/white boundary — the two corners are *inverted* (concave) fillets, the
+ * same trick CSS would do with `::before`/`::after` radial gradients: the seam
+ * curves organically back into the white panel instead of ending in a hard
+ * corner. The pill keeps its smooth Y-axis slide between the STAFF / STUDENT
+ * slots (transform 0.35s cubic-bezier(0.4, 0, 0.2, 1)).
  */
 const NOTCH_W = 132;
 const NOTCH_SLOT = 40;
 const NOTCH_PATH =
-  'M132 0 A10 10 0 0 1 122 10 L22 10 A16 16 0 0 0 8 20 A16 16 0 0 0 22 30 L122 30 A10 10 0 0 1 132 40 Z';
+  'M132 0 A10 10 0 0 0 122 10 L22 10 A10 10 0 0 0 22 30 L122 30 A10 10 0 0 0 132 40 Z';
 
 /** The two roles the notch morphs between, top STAFF / bottom STUDENT. */
 const AUDIENCE_OPTIONS = [
@@ -131,19 +137,47 @@ export default function Login() {
   const passwordRef = useRef(null);
 
   const { data: setup } = useApi('/auth/setup-status');
-  const institutionName = setup?.institutionName || 'Itahari International College';
   const minLength = setup?.passwordPolicy?.minLength ?? 10;
 
   // Public status endpoint (no session required). Polled once on mount; the
   // banner is a courtesy — the server is the authority that actually refuses
-  // campus sign-ins while maintenance mode is on.
+  // sign-ins while maintenance mode is on.
   const { data: systemStatus } = useApi('/system/status');
-  const maintenanceMode = Boolean(systemStatus?.isMaintenanceMode);
-  const maintenanceMessage = systemStatus?.message || 'Server is currently under maintenance';
+  const globalMaintenanceMode = Boolean(systemStatus?.isMaintenanceMode);
+  const globalMaintenanceMessage = systemStatus?.message || 'Server is currently under maintenance';
 
+  // Tenant-scoped maintenance: once an email is typed, ask the public status
+  // endpoint to resolve the address to its campus and report that campus's own
+  // switch. Only that campus's users (staff + students) are affected, so the
+  // yellow warning appears only when THEIR institution is under maintenance.
+  const [campusMaintenance, setCampusMaintenance] = useState(null);
   useEffect(() => {
-    document.title = `Sign in · ${institutionName}`;
-  }, [institutionName]);
+    if (step !== 'email' || !EMAIL_RE.test(email.trim())) {
+      setCampusMaintenance(null);
+      return undefined;
+    }
+    let active = true;
+    const timer = setTimeout(async () => {
+      try {
+        const response = await api.get(
+          `/system/status?email=${encodeURIComponent(email.trim().toLowerCase())}`,
+        );
+        if (active) setCampusMaintenance(response.data ?? null);
+      } catch {
+        if (active) setCampusMaintenance(null);
+      }
+    }, 350);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [email, step]);
+
+  const maintenanceMode = globalMaintenanceMode || Boolean(campusMaintenance?.isMaintenanceMode);
+  const maintenanceMessage = campusMaintenance?.isMaintenanceMode
+    ? campusMaintenance.message
+    : globalMaintenanceMessage;
+  const maintenanceInstitution = campusMaintenance?.isMaintenanceMode ? campusMaintenance.institutionName : null;
 
   // Announce an inactivity sign-out exactly once, then strip the flag so a
   // refresh does not repeat it.
@@ -312,14 +346,19 @@ export default function Login() {
 
   return (
     <div className="login-light flex h-screen min-h-screen w-screen flex-col overflow-hidden bg-white">
-      {/* Global maintenance badge — pinned top-right, above the split layout. */}
+      {/* Maintenance warning badge — pinned top-right, above the split layout.
+          Shown when the platform as a whole is under maintenance, or when the
+          campus the typed email belongs to is under maintenance. */}
       {maintenanceMode ? (
         <div
           role="status"
+          aria-label="Maintenance notice"
           className="fixed top-4 right-4 z-50 flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2 text-[0.8rem] font-bold text-amber-800 shadow-lg shadow-amber-500/10"
         >
           <Icon name="alert" className="h-4 w-4 shrink-0 text-amber-500" />
-          <span>⚠️ Server under maintenance</span>
+          <span>
+            {maintenanceInstitution ? `${maintenanceInstitution} — under maintenance` : 'Server under maintenance'}
+          </span>
         </div>
       ) : null}
 
@@ -388,7 +427,10 @@ export default function Login() {
               STAFF (top) and STUDENT (bottom) as the audience changes. Desktop
               only — the horizontal segment below takes over below `lg`. */}
           <div className="absolute top-32 right-0 z-30 hidden select-none lg:block">
-            <div className="relative" style={{ width: NOTCH_W, height: NOTCH_SLOT * 2 }}>
+            {/* `overflow` is left visible here so the capsule's full left cap and
+                the inverted right-edge fillets are never chopped by a parent
+                clip; only the decorative blur layer behind keeps `overflow-hidden`. */}
+            <div className="relative overflow-visible" style={{ width: NOTCH_W, height: NOTCH_SLOT * 2 }}>
               {/* Sliding white pill */}
               <div
                 aria-hidden="true"
@@ -498,13 +540,13 @@ export default function Login() {
               <p className="mt-1 mb-6 text-center text-sm text-slate-500">
                 {step === 'email'
                   ? (isStudent
-                      ? `Access your route, bus and live shuttle status at ${institutionName}.`
-                      : `Sign in to the ${institutionName} shuttle operations console.`)
+                      ? 'Access your route, bus and live shuttle status for your campus.'
+                      : 'Sign in to your campus shuttle operations console.')
                   : step === 'setup'
                     ? (isStudent
                         ? 'Create the password you will use to reach your rider dashboard.'
                         : 'First time here? Create the password you will use from now on.')
-                    : `Enter your password to continue to ${institutionName}.`}
+                    : 'Enter your password to continue.'}
               </p>
 
               {maintenanceMode ? (
@@ -515,7 +557,9 @@ export default function Login() {
                   <Icon name="alert" className="mt-px h-4 w-4 shrink-0 text-amber-500" />
                   <p className="min-w-0 flex-1">
                     <span className="font-semibold">Maintenance in progress.</span> {maintenanceMessage}{' '}
-                    Only the Platform Super Administrator can sign in right now.
+                    {maintenanceInstitution
+                      ? 'Only your campus System Administrator can sign in right now.'
+                      : 'Only the Platform Super Administrator can sign in right now.'}
                   </p>
                 </div>
               ) : null}
@@ -580,7 +624,8 @@ export default function Login() {
                 >
                   <Icon name="info" className="mt-px h-4 w-4 shrink-0 text-blue-500" />
                   <p className="min-w-0 flex-1">
-                    Only verified university emails (@iic.edu.np) can access live route schedules.
+                    Only verified institutional student emails (e.g., @yourcollege.edu) can access live
+                    route schedules.
                   </p>
                 </div>
               ) : null}
@@ -600,7 +645,7 @@ export default function Login() {
                         type="email"
                         name="email"
                         autoComplete="username"
-                        placeholder={isStudent ? 'student@iic.edu.np' : 'admin@iic.edu.np'}
+                        placeholder={isStudent ? 'student@yourcollege.edu' : 'admin@yourcollege.edu'}
                         value={email}
                         onChange={(event) => {
                           setEmail(event.target.value);

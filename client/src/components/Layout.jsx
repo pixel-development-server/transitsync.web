@@ -188,7 +188,7 @@ export default function Layout() {
               TransitSync
             </p>
             <p className="truncate text-[0.63rem] tracking-[0.08em] text-mist-500 uppercase">
-              Shuttle Operations
+              {user?.institutionName ?? 'Shuttle Operations'}
             </p>
           </div>
           <button
@@ -438,7 +438,8 @@ export default function Layout() {
 
         <footer className="shrink-0 border-t border-[var(--border-subtle)] px-6 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
           <p className="text-[0.7rem] text-mist-500">
-            TransitSync — RFID campus shuttle management · Itahari International College
+            TransitSync — RFID campus shuttle management
+            {user?.institutionName ? ` · ${user.institutionName}` : ''}
           </p>
         </footer>
       </div>

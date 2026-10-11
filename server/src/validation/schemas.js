@@ -389,6 +389,21 @@ export const maintenanceSchema = z
     message: 'Provide enabled and/or message.',
   });
 
+/**
+ * Tenant-scoped maintenance switch (PUT /api/institution/maintenance). A campus
+ * System Administrator toggles their OWN institution; the Level 200 Super
+ * Administrator may pass `tenantId` to target any campus.
+ */
+export const institutionMaintenanceSchema = z
+  .object({
+    enabled: z.coerce.boolean({ invalid_type_error: 'enabled must be a boolean' }),
+    message: trimmed(1, 300).optional(),
+    tenantId: z.string().trim().uuid('Unknown college tenant.').optional(),
+  })
+  .refine((data) => data.enabled !== undefined, {
+    message: 'Provide enabled.',
+  });
+
 // ---------------------------------------------------------------------------
 // Multi-tenant college provisioning
 // ---------------------------------------------------------------------------

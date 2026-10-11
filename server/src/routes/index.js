@@ -14,6 +14,7 @@ import streamRoutes from './stream.routes.js';
 import settingsRoutes from './settings.routes.js';
 import adminRoutes from './admin.routes.js';
 import systemRoutes from './system.routes.js';
+import institutionRoutes from './institution.routes.js';
 import superAdminRoutes from './superadmin.routes.js';
 import studentPortalRoutes from './student.routes.js';
 import { getDb } from '../db/connection.js';
@@ -87,6 +88,9 @@ router.use('/settings', settingsRoutes);
 router.use('/system', settingsRoutes);
 // System Control — exclusive to the Level 100 System Administrator.
 router.use('/admin', adminRoutes);
+// Tenant-scoped maintenance — campus System Administrator (Level 100) or the
+// Level 200 platform owner.
+router.use('/institution', institutionRoutes);
 // Platform Master — exclusive to the Level 200 Super Administrator.
 router.use('/super-admin', superAdminRoutes);
 // Rider portal — exclusive to the Level 1 `student` role.

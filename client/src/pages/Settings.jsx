@@ -265,6 +265,7 @@ function BackupsPanel() {
  * every /api/admin route; the UI simply only renders for that role.
  */
 function SystemControlPanel() {
+  const { user } = useAuth();
   const toast = useToast();
   const [state, setState] = useState(null);
   const [message, setMessage] = useState('');
@@ -272,6 +273,13 @@ function SystemControlPanel() {
   const [busy, setBusy] = useState(false);
   const [confirmPurge, setConfirmPurge] = useState(false);
   const [confirmRevoke, setConfirmRevoke] = useState(false);
+
+  // Tenant-scoped maintenance — THIS campus only. Other institutions are never
+  // affected, and this System Administrator stays exempt so the switch can
+  // always be turned back off.
+  const [campusMaintenance, setCampusMaintenance] = useState(null);
+  const [maintenanceNotice, setMaintenanceNotice] = useState('');
+  const [busyMaintenance, setBusyMaintenance] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -282,9 +290,24 @@ function SystemControlPanel() {
     }
   }, []);
 
+  const reloadCampusMaintenance = useCallback(async () => {
+    const tenantId = user?.tenantId;
+    if (!tenantId) return;
+    try {
+      const response = await api.get(`/system/status?tenant_id=${encodeURIComponent(tenantId)}`);
+      setCampusMaintenance(response.data ?? null);
+    } catch {
+      // Panel only renders for system admins; a transient failure is not fatal.
+    }
+  }, [user]);
+
   useEffect(() => {
     reload();
   }, [reload]);
+
+  useEffect(() => {
+    reloadCampusMaintenance();
+  }, [reloadCampusMaintenance]);
 
   const toggleLockdown = useCallback(async () => {
     setBusy(true);
@@ -302,6 +325,28 @@ function SystemControlPanel() {
       setBusy(false);
     }
   }, [state, message, reload, toast]);
+
+  const toggleCampusMaintenance = useCallback(async () => {
+    setBusyMaintenance(true);
+    const nextEnabled = !(campusMaintenance?.isMaintenanceMode ?? false);
+    try {
+      const response = await api.put('/institution/maintenance', {
+        enabled: nextEnabled,
+        message: maintenanceNotice.trim() || undefined,
+      });
+      setCampusMaintenance(response.data ?? null);
+      setMaintenanceNotice('');
+      toast.success(
+        nextEnabled
+          ? 'Campus maintenance engaged — only this campus is affected.'
+          : 'Campus maintenance cleared.',
+      );
+    } catch (caught) {
+      toast.error(caught.message);
+    } finally {
+      setBusyMaintenance(false);
+    }
+  }, [campusMaintenance, maintenanceNotice, toast]);
 
   const archiveAudit = useCallback(async () => {
     setBusy(true);
@@ -378,6 +423,46 @@ function SystemControlPanel() {
               onChange={(event) => setMessage(event.target.value)}
               placeholder="e.g. Scheduled maintenance until 18:00"
               disabled={busy}
+              className="mt-1"
+            />
+          </label>
+        </section>
+
+        <section className="rounded-xl bg-[var(--surface-sunken)] px-4 py-3.5">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h4 className="text-[0.82rem] font-semibold text-mist-100">Campus maintenance mode</h4>
+              <p className="mt-0.5 text-[0.72rem] leading-relaxed text-mist-500">
+                {user?.institutionName ? (
+                  <>
+                    Put <span className="font-semibold text-mist-300">{user.institutionName}</span> into
+                    maintenance. Only that campus's users are blocked from sign-in and live sessions —
+                    every other institution keeps working. You stay signed in so maintenance can be
+                    turned back off.
+                  </>
+                ) : (
+                  'Put this campus into maintenance. Only its users are blocked from sign-in and live sessions — every other institution keeps working.'
+                )}
+              </p>
+            </div>
+            <button
+              type="button"
+              className={`btn shrink-0 ${campusMaintenance?.isMaintenanceMode ? 'btn-danger' : 'btn-ghost'}`}
+              onClick={toggleCampusMaintenance}
+              disabled={busyMaintenance}
+            >
+              {campusMaintenance?.isMaintenanceMode ? 'End maintenance' : 'Start maintenance'}
+            </button>
+          </div>
+          <label className="mt-3 block">
+            <span className="text-[0.68rem] tracking-[0.05em] text-mist-500 uppercase">
+              Notice shown to this campus (optional)
+            </span>
+            <Input
+              value={maintenanceNotice}
+              onChange={(event) => setMaintenanceNotice(event.target.value)}
+              placeholder="This campus transport system is currently under maintenance."
+              disabled={busyMaintenance}
               className="mt-1"
             />
           </label>
@@ -473,7 +558,13 @@ export default function Settings() {
     enabled: can('settings:read'),
   });
 
-  const settings = data?.settings ?? EMPTY;
+  // The platform-wide maintenance switch is the Super Administrator's facility
+  // (super-admin console), and campus-level maintenance is managed from the
+  // System Control panel below — exposing the raw `settings` rows here invites a
+  // campus admin to take the WHOLE platform down with one toggle.
+  const settings = (data?.settings ?? EMPTY).filter(
+    (item) => item.key !== 'maintenance_mode' && item.key !== 'maintenance_message',
+  );
   const system = data?.system;
 
   // Seed the form once, then let local edits win.
