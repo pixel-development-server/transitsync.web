@@ -44,6 +44,9 @@ const Users = lazy(() => import('./pages/Users.jsx'));
 const Roles = lazy(() => import('./pages/Roles.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
 const Profile = lazy(() => import('./pages/Profile.jsx'));
+const Colleges = lazy(() => import('./pages/super-admin/Colleges.jsx'));
+const PlatformSystem = lazy(() => import('./pages/super-admin/SystemPanel.jsx'));
+const StudentPortal = lazy(() => import('./pages/student/StudentPortal.jsx'));
 
 function FullPageSpinner() {
   return (
@@ -91,6 +94,45 @@ function PermissionGate({ permission, children }) {
   }
 
   return children;
+}
+
+/** PLATFORM MASTER surface — reserved for the Level 200 Super Administrator. */
+function SuperAdminGate({ children }) {
+  const { user } = useAuth();
+
+  if (Number(user?.roleLevel ?? 0) < 200) {
+    return (
+      <EmptyState
+        icon="lock"
+        title="Platform access only"
+        message="This area is reserved for the Platform Super Administrator (Level 200)."
+        className="min-h-[50vh]"
+      />
+    );
+  }
+
+  return children;
+}
+
+/** Read-only rider portal — reserved for the STUDENT role. */
+function StudentGate({ children }) {
+  const { user } = useAuth();
+
+  if (user?.role !== 'student') {
+    return <Navigate to="/" replace />;
+  }
+
+  return children;
+}
+
+/**
+ * Keeps a signed-in student out of the operations console. Students reach the
+ * app shell only to be redirected to their own portal.
+ */
+function StaffOnly() {
+  const { user } = useAuth();
+  if (user?.role === 'student') return <Navigate to="/student/dashboard" replace />;
+  return <Outlet />;
 }
 
 /**
@@ -163,9 +205,22 @@ function AppRoutes() {
       <Route path="/change-password" element={<ChangePassword />} />
 
       <Route element={<Protected />}>
+        {/* Read-only rider portal — its own chrome, no operations console. */}
+        <Route
+          path="/student/dashboard"
+          element={
+            <StudentGate>
+              <Suspense fallback={<FullPageSpinner />}>
+                <StudentPortal />
+              </Suspense>
+            </StudentGate>
+          }
+        />
+
         <Route element={<Shell />}>
           <Route element={<Layout />}>
-            <Route index element={<Dashboard />} />
+            <Route element={<StaffOnly />}>
+              <Route index element={<Dashboard />} />
 
             <Route
               path="live"
@@ -235,9 +290,28 @@ function AppRoutes() {
             />
             <Route path="profile" element={<Profile />} />
 
+            <Route
+              path="super-admin/colleges"
+              element={
+                <SuperAdminGate>
+                  <Colleges />
+                </SuperAdminGate>
+              }
+            />
+            <Route
+              path="super-admin/system"
+              element={
+                <SuperAdminGate>
+                  <PlatformSystem />
+                </SuperAdminGate>
+              }
+            />
+            <Route path="super-admin" element={<Navigate to="/super-admin/colleges" replace />} />
+
             {/* Unknown paths fall back to the Dashboard instead of a dead-end
                 "Page not found", so stale bookmarks and typos still show the app. */}
             <Route path="*" element={<Navigate to="/" replace />} />
+            </Route>
           </Route>
         </Route>
       </Route>

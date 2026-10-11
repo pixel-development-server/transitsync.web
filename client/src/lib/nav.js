@@ -36,11 +36,27 @@ export const NAV_SECTIONS = [
       { to: '/settings', label: 'Settings', icon: 'settings', permission: 'settings:read' },
     ],
   },
+  {
+    // Level 200 only. Gated on the role itself (`superAdmin`) rather than a
+    // permission, because the System Administrator holds every permission and
+    // must NOT see the platform surface.
+    label: 'Platform Master',
+    items: [
+      { to: '/super-admin/colleges', label: 'College Management', icon: 'building', superAdmin: true },
+      { to: '/super-admin/system', label: 'Global System & Maintenance', icon: 'platform', superAdmin: true },
+    ],
+  },
 ];
 
+/** True when a nav item is reachable for the given permission probe + role level. */
+export function canSeeNavItem(item, { can, roleLevel = 0 } = {}) {
+  if (item.superAdmin) return Number(roleLevel) >= 200;
+  return !item.permission || can(item.permission);
+}
+
 /** Flat list of every route the user is allowed to reach. */
-export function allowedRoutes(can) {
+export function allowedRoutes(can, roleLevel = 0) {
   return NAV_SECTIONS.flatMap((section) =>
-    section.items.filter((item) => !item.permission || can(item.permission)).map((item) => item.to),
+    section.items.filter((item) => canSeeNavItem(item, { can, roleLevel })).map((item) => item.to),
   );
 }

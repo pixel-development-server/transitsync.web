@@ -1,9 +1,8 @@
 import express from 'express';
-import crypto from 'node:crypto';
 
 import { getDb } from '../db/connection.js';
 import { asyncHandler, validate, parsePagination, paginationMeta } from '../lib/http.js';
-import { hashPassword, PASSWORD_UNSET } from '../lib/password.js';
+import { hashPassword, PASSWORD_UNSET, generateTemporaryPassword } from '../lib/password.js';
 import { badRequest, conflict, notFound, unprocessable, forbidden } from '../lib/errors.js';
 import { requirePermission } from '../middleware/requirePermission.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -37,24 +36,6 @@ function assertKnownPermissions(permissions = []) {
   if (unknown.length) {
     throw unprocessable('Unknown permission key(s).', unknown.map((key) => ({ field: 'permissions', message: `${key} is not a valid permission.` })));
   }
-}
-
-/**
- * Single-use handover credential.
- *
- * Deliberately simple: a temporary password is exempt from the user-facing
- * complexity policy (the holder is forced to set their own password at first
- * sign-in), so we favour a short, unambiguous string that is easy to read aloud
- * or retype. The alphabet omits i/l/o/0/1 to avoid transcription mistakes.
- */
-export function generateTemporaryPassword() {
-  const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
-  const bytes = crypto.randomBytes(8);
-  let password = '';
-  for (let i = 0; i < bytes.length; i += 1) {
-    password += alphabet[bytes[i] % alphabet.length];
-  }
-  return password;
 }
 
 /**

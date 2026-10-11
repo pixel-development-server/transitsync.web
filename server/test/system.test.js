@@ -5,6 +5,7 @@ import {
   bootServer,
   call,
   login,
+  loginAdmin,
   loginSuperAdmin,
   ADMIN_EMAIL,
   ADMIN_PASSWORD,
@@ -151,9 +152,98 @@ test('maintenance mode refuses campus sign-ins but lets the Super Admin through'
 });
 
 // ---------------------------------------------------------------------------
-// Safety interlock
+// College provisioning
 // ---------------------------------------------------------------------------
 
+test('the master panel lists the seeded campus with its administrator', async () => {
+  const response = await call(ctx, 'GET', '/api/super-admin/colleges', { token: superAdmin.token });
+  assert.equal(response.status, 200);
+
+  const iic = response.body.data.colleges.find((college) => college.code === 'iic');
+  assert.ok(iic, 'the default campus should be listed');
+  assert.equal(iic.status, 'ACTIVE');
+  assert.equal(iic.adminEmail, ADMIN_EMAIL);
+});
+
+test('a level-100 campus administrator cannot reach the platform surface', async () => {
+  const admin = await loginAdmin(ctx);
+  const response = await call(ctx, 'GET', '/api/super-admin/colleges', { token: admin.token });
+  assert.equal(response.status, 403);
+  assert.equal(response.body.error.code, 'SUPER_ADMIN_ONLY');
+});
+
+test('registering a college provisions its level-100 administrator with a one-time password', async () => {
+  const created = await call(ctx, 'POST', '/api/super-admin/colleges', {
+    token: superAdmin.token,
+    body: {
+      name: 'Test Valley College',
+      code: 'tvc',
+      adminEmail: 'admin@tvc.edu.np',
+      adminName: 'TVC Administrator',
+    },
+  });
+  assert.equal(created.status, 201);
+
+  const { college, credentials } = created.body.data;
+  assert.equal(college.code, 'tvc');
+  assert.equal(college.status, 'ACTIVE');
+  assert.equal(college.adminEmail, 'admin@tvc.edu.np');
+  assert.ok(credentials.temporaryPassword.length >= 6);
+
+  // The new administrator sits at level 100 and is tenant-scoped to the campus.
+  const adminRow = ctx.db
+    .prepare(
+      `SELECT r.level, u.tenant_id, u.force_password_reset
+         FROM users u JOIN roles r ON r.id = u.role_id WHERE u.email = ?`,
+    )
+    .get('admin@tvc.edu.np');
+  assert.equal(adminRow.level, 100);
+  assert.equal(adminRow.tenant_id, college.id);
+  assert.equal(adminRow.force_password_reset, 1);
+
+  // The handover credential signs in but is walled behind the rotation gate.
+  const firstLogin = await call(ctx, 'POST', '/api/auth/login', {
+    body: { email: 'admin@tvc.edu.np', password: credentials.temporaryPassword },
+  });
+  assert.equal(firstLogin.status, 200);
+  assert.equal(firstLogin.body.data.mustChangePassword, true);
+
+  // Duplicate slug and duplicate administrator email are both refused.
+  const duplicateCode = await call(ctx, 'POST', '/api/super-admin/colleges', {
+    token: superAdmin.token,
+    body: { name: 'Another Campus', code: 'tvc', adminEmail: 'other@tvc.edu.np' },
+  });
+  assert.equal(duplicateCode.status, 409);
+
+  const duplicateEmail = await call(ctx, 'POST', '/api/super-admin/colleges', {
+    token: superAdmin.token,
+    body: { name: 'Another Campus', code: 'tvc-two', adminEmail: 'admin@tvc.edu.np' },
+  });
+  assert.equal(duplicateEmail.status, 409);
+});
+
+test('a college can be suspended and the platform overview reports figures', async () => {
+  const list = await call(ctx, 'GET', '/api/super-admin/colleges', { token: superAdmin.token });
+  const tvc = list.body.data.colleges.find((college) => college.code === 'tvc');
+
+  const suspended = await call(ctx, 'PATCH', `/api/super-admin/colleges/${tvc.id}`, {
+    token: superAdmin.token,
+    body: { status: 'SUSPENDED' },
+  });
+  assert.equal(suspended.status, 200);
+  assert.equal(suspended.body.data.college.status, 'SUSPENDED');
+
+  const overview = await call(ctx, 'GET', '/api/super-admin/overview', { token: superAdmin.token });
+  assert.equal(overview.status, 200);
+  assert.equal(overview.body.data.colleges.total, 2);
+  assert.equal(overview.body.data.colleges.suspended, 1);
+  assert.ok(overview.body.data.users.total >= 6);
+  assert.equal(typeof overview.body.data.maintenance.isMaintenanceMode, 'boolean');
+});
+
+// ---------------------------------------------------------------------------
+// Safety interlock
+// ---------------------------------------------------------------------------
 test('maintenance cannot be enabled while no Super Administrator exists', () => {
   const stub = {
     prepare() {

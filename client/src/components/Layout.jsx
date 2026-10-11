@@ -15,7 +15,7 @@ import { Badge, LiveIndicator } from './ui.jsx';
 import { useAuth } from '../lib/auth.jsx';
 import { useApi } from '../lib/hooks.js';
 import { useEventStream } from '../lib/stream.js';
-import { NAV_SECTIONS } from '../lib/nav.js';
+import { NAV_SECTIONS, canSeeNavItem } from '../lib/nav.js';
 import { initials } from '../lib/format.js';
 
 const THEME_KEY = 'transitsync.theme';
@@ -119,13 +119,15 @@ export default function Layout() {
 
   const openAlerts = alertStats?.open ?? null;
 
+  const roleLevel = Number(user?.roleLevel ?? 0);
+
   const visibleSections = useMemo(
     () =>
       NAV_SECTIONS.map((section) => ({
         ...section,
-        items: section.items.filter((item) => !item.permission || can(item.permission)),
+        items: section.items.filter((item) => canSeeNavItem(item, { can, roleLevel })),
       })).filter((section) => section.items.length > 0),
-    [can],
+    [can, roleLevel],
   );
 
   const handleSignOut = async () => {

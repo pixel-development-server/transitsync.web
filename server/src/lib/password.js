@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import config from '../config/env.js';
 
@@ -5,6 +6,25 @@ const SALT_ROUNDS = 12;
 
 export async function hashPassword(plain) {
   return bcrypt.hash(plain, SALT_ROUNDS);
+}
+
+/**
+ * Handover credential for an invited account (first-time user or a newly
+ * provisioned campus administrator).
+ *
+ * Deliberately simple: a temporary password is exempt from the user-facing
+ * complexity policy (the holder is forced to set their own password at first
+ * sign-in), so we favour a short, unambiguous string that is easy to read aloud
+ * or retype. The alphabet omits i/l/o/0/1 to avoid transcription mistakes.
+ */
+export function generateTemporaryPassword() {
+  const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const bytes = crypto.randomBytes(8);
+  let password = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    password += alphabet[bytes[i] % alphabet.length];
+  }
+  return password;
 }
 
 export async function verifyPassword(plain, hash) {

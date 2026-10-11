@@ -3,13 +3,12 @@ import express from 'express';
 import { getDb } from '../db/connection.js';
 import { asyncHandler, validate } from '../lib/http.js';
 import { badRequest, notFound } from '../lib/errors.js';
-import { hashPassword } from '../lib/password.js';
+import { hashPassword, generateTemporaryPassword } from '../lib/password.js';
 import { requireAuth, requireSystemAdmin } from '../middleware/auth.js';
 import { recordAudit, fromRequest, listAudit } from '../services/audit.js';
 import { loadUserForAuth } from '../services/permissions.js';
 import { toCsv, timestampedFilename } from '../lib/csv.js';
 import { idSchema } from '../validation/schemas.js';
-import { generateTemporaryPassword } from './users.routes.js';
 
 const router = express.Router();
 

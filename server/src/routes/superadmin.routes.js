@@ -13,7 +13,18 @@ import { asyncHandler, validate } from '../lib/http.js';
 import { requireSuperAdmin } from '../middleware/auth.js';
 import { recordAudit, fromRequest } from '../services/audit.js';
 import { getMaintenance, setMaintenance } from '../services/maintenance.js';
-import { maintenanceSchema } from '../validation/schemas.js';
+import {
+  listColleges,
+  provisionCollege,
+  setCollegeStatus,
+  platformOverview,
+} from '../services/colleges.js';
+import {
+  maintenanceSchema,
+  collegeCreateSchema,
+  collegeStatusSchema,
+  collegeIdSchema,
+} from '../validation/schemas.js';
 
 const router = express.Router();
 
@@ -41,6 +52,71 @@ router.patch(
       fromRequest(req, 'platform.maintenance', { entity: 'system', detail: { ...state } }),
     );
     res.json({ success: true, data: state });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Colleges (tenants)
+// ---------------------------------------------------------------------------
+
+/** GET /api/super-admin/colleges — every campus with admin + headcounts. */
+router.get(
+  '/colleges',
+  asyncHandler(async (req, res) => {
+    res.json({ success: true, data: { colleges: listColleges(getDb()) } });
+  }),
+);
+
+/**
+ * POST /api/super-admin/colleges — register a campus and its Level 100
+ * System Administrator. Returns the one-time handover credential (no mail
+ * server is configured in this deployment).
+ */
+router.post(
+  '/colleges',
+  validate(collegeCreateSchema),
+  asyncHandler(async (req, res) => {
+    const { name, code, adminEmail, adminName } = req.body;
+    const result = await provisionCollege(getDb(), { name, code, adminEmail, adminName }, req.user.id);
+
+    recordAudit(
+      fromRequest(req, 'platform.college.create', {
+        entity: 'institution',
+        entityId: result.college.id,
+        detail: { name, code, adminEmail },
+      }),
+    );
+
+    res.status(201).json({ success: true, data: result });
+  }),
+);
+
+/** PATCH /api/super-admin/colleges/:id — suspend or restore a campus. */
+router.patch(
+  '/colleges/:id',
+  validate(collegeIdSchema, 'params'),
+  validate(collegeStatusSchema),
+  asyncHandler(async (req, res) => {
+    const college = setCollegeStatus(getDb(), req.params.id, req.body.status);
+    recordAudit(
+      fromRequest(req, 'platform.college.status', {
+        entity: 'institution',
+        entityId: college.id,
+        detail: { status: college.status },
+      }),
+    );
+    res.json({ success: true, data: { college } });
+  }),
+);
+
+/** GET /api/super-admin/overview — platform-wide figures for the health panel. */
+router.get(
+  '/overview',
+  asyncHandler(async (req, res) => {
+    res.json({
+      success: true,
+      data: { ...platformOverview(getDb()), maintenance: getMaintenance() },
+    });
   }),
 );
 

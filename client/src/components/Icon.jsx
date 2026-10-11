@@ -65,6 +65,8 @@ const PATHS = {
   history: 'M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8m9-1v5l4 2',
   qr: 'M3 3h7v7H3V3Zm11 0h7v7h-7V3ZM3 14h7v7H3v-7Zm13 3h2m2 0h1m-5 4h2m2 0h1',
   externalLink: 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14 21 3',
+  building: 'M3 21h18M5 21V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v17M15 21V9h3a1 1 0 0 1 1 1v11M8 7h2M8 11h2M8 15h2',
+  platform: 'M12 2 2 7l10 5 10-5-10-5ZM2 17l10 5 10-5M2 12l10 5 10-5',
 };
 
 export function Icon({ name, className = 'h-4 w-4', strokeWidth = 1.8, ...rest }) {

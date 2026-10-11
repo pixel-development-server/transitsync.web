@@ -357,6 +357,28 @@ export const maintenanceSchema = z
   });
 
 // ---------------------------------------------------------------------------
+// Multi-tenant college provisioning
+// ---------------------------------------------------------------------------
+const collegeCode = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z0-9][a-z0-9-]{1,31}$/, 'Use 2–32 lowercase letters, digits or hyphens.');
+
+export const collegeCreateSchema = z.object({
+  name: trimmed(2, 160),
+  code: collegeCode,
+  adminEmail: z.string().trim().toLowerCase().email('Enter a valid email address.').max(200),
+  adminName: trimmed(2, 160).optional(),
+});
+
+export const collegeStatusSchema = z.object({
+  status: z.enum(['ACTIVE', 'SUSPENDED']),
+});
+
+export const collegeIdSchema = z.object({ id: z.string().trim().uuid('Unknown college id.') });
+
+// ---------------------------------------------------------------------------
 // Shared param schemas
 // ---------------------------------------------------------------------------
 export const idSchema = z.object({ id: idParam });
@@ -396,6 +418,9 @@ export const schemas = {
   deviceBatchSchema,
   settingsPatchSchema,
   maintenanceSchema,
+  collegeCreateSchema,
+  collegeStatusSchema,
+  collegeIdSchema,
   idSchema,
   sessionIdSchema,
   backupFileSchema,
