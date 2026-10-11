@@ -16,27 +16,12 @@ const FEATURES = [
 ];
 
 /**
- * One-slot geometry for the Staff/Student morphing notch (viewBox 0 0 132 40).
- *
- * The white pill is a capsule with a fully rounded LEFT cap (`rounded-l-full`:
- * `border-radius: 9999px 0 0 9999px`) so its left edge is never clipped or cut
- * off inside the blue panel. At the right edge — where the pill meets the
- * blue/white boundary — the two corners are *inverted* (concave) fillets, the
- * same trick CSS would do with `::before`/`::after` radial gradients: the seam
- * curves organically back into the white panel instead of ending in a hard
- * corner. The pill keeps its smooth Y-axis slide between the STAFF / STUDENT
- * slots (transform 0.35s cubic-bezier(0.4, 0, 0.2, 1)).
+ * The Staff/Student toggle is a clean, solid-white capsule pinned flush to the
+ * blue hero's right edge. Its solid-white thumb is `rounded-l-full` so the left
+ * cap is never clipped and glides vertically between the two 42px slots on a
+ * hardware-accelerated `transform`, while its square right edge sits flush on
+ * the panel divider.
  */
-const NOTCH_W = 132;
-const NOTCH_SLOT = 40;
-const NOTCH_PATH =
-  'M132 0 A10 10 0 0 0 122 10 L22 10 A10 10 0 0 0 22 30 L122 30 A10 10 0 0 0 132 40 Z';
-
-/** The two roles the notch morphs between, top STAFF / bottom STUDENT. */
-const AUDIENCE_OPTIONS = [
-  { key: 'staff', icon: 'user', label: 'STAFF' },
-  { key: 'student', icon: 'graduationCap', label: 'STUDENT' },
-];
 
 /** Deliberately loose, client-side format gate; the server validates authoritatively. */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -423,65 +408,55 @@ export default function Login() {
             </ul>
           </div>
 
-          {/* Staff / Student morphing notch: the white curved pill pivots between
-              STAFF (top) and STUDENT (bottom) as the audience changes. Desktop
-              only — the horizontal segment below takes over below `lg`. */}
-          <div className="absolute top-32 right-0 z-30 hidden select-none lg:block">
-            {/* `overflow` is left visible here so the capsule's full left cap and
-                the inverted right-edge fillets are never chopped by a parent
-                clip; only the decorative blur layer behind keeps `overflow-hidden`. */}
-            <div className="relative overflow-visible" style={{ width: NOTCH_W, height: NOTCH_SLOT * 2 }}>
-              {/* Sliding white pill */}
+          {/* Staff / Student sliding notch pinned to the blue hero's right edge.
+              A clean, solid-white thumb glides between the STAFF (top) and
+              STUDENT (bottom) slots; its square right edge sits flush on the
+              panel divider so no sliver of blue shows. Desktop only — the
+              horizontal segment below takes over under `lg`. */}
+          <div className="pointer-events-auto absolute top-32 right-0 z-30 hidden select-none lg:block">
+            <div className="relative flex flex-col py-1 pl-1">
+              {/* Sliding white thumb — 42px matches the slot height exactly.
+                  `pl-1` (no right padding) keeps its right edge flush with the
+                  divider. The transition is declared inline so React re-animates
+                  the coordinate change on every audience toggle. */}
               <div
                 aria-hidden="true"
-                className="absolute inset-x-0"
+                className="absolute left-1 h-[42px] w-[120px] rounded-l-full bg-white shadow-lg"
                 style={{
-                  top: isStudent ? NOTCH_SLOT : 0,
-                  height: NOTCH_SLOT,
-                  transition: 'top 0.35s cubic-bezier(0.4, 0, 0.2, 1)',
+                  transform: isStudent ? 'translateY(42px)' : 'translateY(0px)',
+                  transition: 'transform 400ms cubic-bezier(0.16, 1, 0.3, 1)',
                 }}
-              >
-                <svg
-                  viewBox={`0 0 ${NOTCH_W} ${NOTCH_SLOT}`}
-                  className="h-full w-full"
-                  fill="#ffffff"
-                >
-                  <path d={NOTCH_PATH} />
-                </svg>
-                <span className="absolute inset-0 flex items-center justify-center gap-1.5 text-[0.68rem] font-black tracking-[0.15em] text-slate-900 uppercase">
-                  {AUDIENCE_OPTIONS.map((option) =>
-                    option.key === audience ? (
-                      <span key={option.key} className="flex items-center justify-center gap-1.5">
-                        <Icon name={option.icon} className="h-3.5 w-3.5" strokeWidth={2.2} />
-                        {option.label}
-                      </span>
-                    ) : null,
-                  )}
-                </span>
-              </div>
+              />
 
-              {/* Click targets: inactive labels sit on the blue panel, the active
-                  one is hidden under the opaque pill so its own copy never
-                  flashes against it. */}
-              {AUDIENCE_OPTIONS.map((option, index) => {
-                const isActive = audience === option.key;
-                return (
-                  <button
-                    key={option.key}
-                    type="button"
-                    disabled={submitting || checking || isActive}
-                    onClick={() => switchAudience(option.key)}
-                    aria-label={`Sign in as ${option.label.toLowerCase()}`}
-                    className={`absolute inset-x-0 flex items-center justify-center gap-1.5 text-[0.68rem] font-black tracking-[0.15em] uppercase transition ${
-                      isActive ? 'text-transparent' : 'text-white/80 hover:text-white'
-                    }`}
-                    style={{ top: index * NOTCH_SLOT, height: NOTCH_SLOT }}
-                  >
-                    <Icon name={option.icon} className="h-3.5 w-3.5" strokeWidth={2.2} />
-                    {option.label}
-                  </button>
-                );
-              })}
+              {/* Staff option */}
+              <button
+                type="button"
+                onClick={() => switchAudience('staff')}
+                disabled={submitting || checking}
+                aria-pressed={!isStudent}
+                aria-label="Sign in as staff"
+                className={`relative z-10 flex h-[42px] w-[120px] items-center justify-center gap-1.5 text-xs font-bold tracking-wider uppercase transition-colors duration-300 ${
+                  !isStudent ? 'text-blue-900' : 'text-white/80 hover:text-white'
+                }`}
+              >
+                <Icon name="user" className="h-4 w-4" strokeWidth={2.2} />
+                STAFF
+              </button>
+
+              {/* Student option */}
+              <button
+                type="button"
+                onClick={() => switchAudience('student')}
+                disabled={submitting || checking}
+                aria-pressed={isStudent}
+                aria-label="Sign in as student"
+                className={`relative z-10 flex h-[42px] w-[120px] items-center justify-center gap-1.5 text-xs font-bold tracking-wider uppercase transition-colors duration-300 ${
+                  isStudent ? 'text-blue-900' : 'text-white/80 hover:text-white'
+                }`}
+              >
+                <Icon name="graduationCap" className="h-4 w-4" strokeWidth={2.2} />
+                STUDENT
+              </button>
             </div>
           </div>
         </aside>
