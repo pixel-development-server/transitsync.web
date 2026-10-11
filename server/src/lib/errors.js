@@ -27,12 +27,24 @@ function defaultCode(status) {
 export const badRequest = (message, details) => new AppError(400, message, { code: 'BAD_REQUEST', details });
 export const unauthorized = (message = 'Authentication required.', code) =>
   new AppError(401, message, { code: code || 'UNAUTHENTICATED' });
-export const forbidden = (message = 'You do not have permission to perform this action.', details) =>
-  new AppError(403, message, { code: 'FORBIDDEN', details });
+export const forbidden = (message = 'You do not have permission to perform this action.', options) => {
+  const { code, ...details } = options && typeof options === 'object' ? options : {};
+  return new AppError(403, message, {
+    code: code || 'FORBIDDEN',
+    details: Object.keys(details).length ? details : null,
+  });
+};
 export const notFound = (resource = 'Resource') => new AppError(404, `${resource} not found.`, { code: 'NOT_FOUND' });
 export const conflict = (message, details) => new AppError(409, message, { code: 'CONFLICT', details });
 export const unprocessable = (message, details) => new AppError(422, message, { code: 'VALIDATION_FAILED', details });
 export const accountLocked = (message) => new AppError(423, message, { code: 'ACCOUNT_LOCKED' });
+
+/**
+ * Raised while the System Administrator has engaged the Global Emergency
+ * Lockout. Every non-admin session is frozen until the switch is cleared.
+ */
+export const serviceLocked = (message = 'The TransitSync system is under maintenance. Please try again later.') =>
+  new AppError(503, message, { code: 'SYSTEM_LOCKDOWN' });
 
 /**
  * The forced first-login rotation gate. It gets its own top-level code so a

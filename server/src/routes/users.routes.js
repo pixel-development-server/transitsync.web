@@ -47,7 +47,7 @@ function assertKnownPermissions(permissions = []) {
  * sign-in), so we favour a short, unambiguous string that is easy to read aloud
  * or retype. The alphabet omits i/l/o/0/1 to avoid transcription mistakes.
  */
-function generateTemporaryPassword() {
+export function generateTemporaryPassword() {
   const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
   const bytes = crypto.randomBytes(8);
   let password = '';
@@ -55,6 +55,37 @@ function generateTemporaryPassword() {
     password += alphabet[bytes[i] % alphabet.length];
   }
   return password;
+}
+
+/**
+ * Seniority guard for account management: a principal may only modify staff
+ * strictly below their own level, and may never touch a peer or a System
+ * Administrator (level 100). Self-edits of one's own profile stay allowed —
+ * role/status changes on self are guarded separately by the routes.
+ */
+function assertRankAbove(actor, target, action = 'modify') {
+  if (actor.id === target.id) return;
+  if (Number(actor.role_level) <= Number(target.role_level)) {
+    throw forbidden(
+      `You cannot ${action} ${target.role_name ?? `user level ${target.role_level}`} at or above your own ` +
+        `seniority (your level ${actor.role_level} vs. their level ${target.role_level}).`,
+      { code: 'LEVEL_LOCKED' },
+    );
+  }
+}
+
+/**
+ * A role can only be granted when it sits strictly below the actor's level.
+ * This is what keeps the System Administrator role (100) immutable and stops
+ * every other level from handing it out.
+ */
+function assertAssignableRole(actor, role, action = 'assign') {
+  if (Number(actor.role_level) <= Number(role.level)) {
+    throw forbidden(
+      `You cannot ${action} the "${role.name}" role (level ${role.level}) at or above your own level (${actor.role_level}).`,
+      { code: 'LEVEL_LOCKED' },
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +278,10 @@ router.post(
     const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(roleId);
     if (!role) throw unprocessable('Unknown role.', [{ field: 'roleId', message: 'Pick a valid role.' }]);
 
+    // No user may mint a role at or above their own seniority — this keeps the
+    // System Administrator role immutable to every other level.
+    assertAssignableRole(req.user, role);
+
     if (role.key === ROLE_KEYS.SYSTEM_ADMIN && !req.user.permissions.includes('users:assign_permissions')) {
       throw forbidden('Only an administrator with users:assign_permissions may create another System Administrator.');
     }
@@ -336,6 +371,10 @@ router.patch(
     const { fullName, roleId, status, jobTitle, department, phone } = req.body;
     const isSelf = id === Number(req.user.id);
 
+    // Seniority rule: you may edit staff strictly below your own level, never a
+    // System Administrator or a peer at your level. Self-edits pass this guard.
+    assertRankAbove(req.user, target, 'edit');
+
     if (isSelf && status && status !== 'active') {
       throw badRequest('You cannot suspend your own account.');
     }
@@ -357,6 +396,9 @@ router.patch(
       }
       if (role.key === ROLE_KEYS.SYSTEM_ADMIN && !req.user.permissions.includes('users:assign_permissions')) {
         throw forbidden('Granting the System Administrator role requires users:assign_permissions.');
+      }
+      if (roleId !== target.role_id) {
+        assertAssignableRole(req.user, role, 'grant');
       }
     }
 
@@ -403,6 +445,7 @@ router.put(
     const id = Number(req.params.id);
     const target = loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
+    assertRankAbove(req.user, target, 'change permissions for');
 
     const { permissionsMode, permissions } = req.body;
     assertKnownPermissions(permissions);
@@ -453,7 +496,9 @@ router.delete(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    if (!loadUserForAuth(db, id)) throw notFound('Staff member');
+    const target = loadUserForAuth(db, id);
+    if (!target) throw notFound('Staff member');
+    assertRankAbove(req.user, target, 'reset permissions for');
 
     db.transaction(() => {
       db.prepare('DELETE FROM user_permissions WHERE user_id = ?').run(id);
@@ -478,6 +523,7 @@ router.post(
     const id = Number(req.params.id);
     const target = loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
+    assertRankAbove(req.user, target, 'force a password reset for');
     if (id === Number(req.user.id)) throw badRequest('You cannot force a password reset on your own account.');
 
     db.prepare("UPDATE users SET force_password_reset = 1, password_changed = 0, updated_at = datetime('now') WHERE id = ?").run(id);
@@ -496,8 +542,9 @@ router.post(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const target = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    const target = loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
+    assertRankAbove(req.user, target, 'reset the password for');
 
     const plain = generateTemporaryPassword();
     const passwordHash = await hashPassword(plain);
@@ -543,6 +590,8 @@ router.delete(
         .get(ROLE_KEYS.SYSTEM_ADMIN, id).n;
       if (remaining === 0) throw badRequest('At least one active System Administrator must remain.');
     }
+
+    assertRankAbove(req.user, target, 'delete');
 
     // Soft-delete keeps audit history and FK integrity intact.
     db.prepare(
@@ -592,6 +641,8 @@ router.delete(
       if (remaining === 0) throw badRequest('At least one active System Administrator must remain.');
     }
 
+    assertRankAbove(req.user, target, 'delete');
+
     db.prepare('DELETE FROM users WHERE id = ?').run(id);
     recordAudit(fromRequest(req, 'user.purge', { entity: 'user', entityId: id, detail: { email: target.email } }));
     res.json({ success: true, data: { message: `${target.full_name} has been permanently deleted.` } });
@@ -616,7 +667,7 @@ rolesRouter.get(
       const headcount = db
         .prepare('SELECT COUNT(*) AS n FROM users WHERE role_id = ? AND status = ?')
         .get(role.id, 'active').n;
-      return { ...role, headcount, editable: role.is_system !== 1 || true };
+      return { ...role, headcount, editable: Number(req.user.role_level) > Number(role.level) };
     });
     res.json({ success: true, data: { roles, modules: MODULES, permissions: ALL_PERMISSIONS } });
   }),
@@ -633,6 +684,13 @@ rolesRouter.put(
 
     if (role.key === ROLE_KEYS.SYSTEM_ADMIN) {
       throw badRequest('The System Administrator role always holds every permission and cannot be edited.');
+    }
+
+    // Seniority rule: a role at or above the caller's level is untouchable.
+    // Combined with the guard above this makes the System Administrator role
+    // immutable to every level in the system.
+    if (Number(req.user.role_level) <= Number(role.level)) {
+      throw forbidden('You can only edit roles below your own seniority level.', { code: 'LEVEL_LOCKED' });
     }
 
     setRolePermissions(db, role.id, req.body.permissions);

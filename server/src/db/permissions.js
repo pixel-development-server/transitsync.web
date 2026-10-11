@@ -77,7 +77,7 @@ export const MODULES = [
   {
     key: 'roles',
     label: 'Roles & Permission Sets',
-    description: 'Permission sets attached to the three system roles.',
+    description: 'Permission sets attached to the built-in system roles.',
     actions: [
       { action: 'read', label: 'Read' },
       { action: 'edit', label: 'Edit' },
@@ -97,6 +97,17 @@ export const MODULES = [
     label: 'Database Backup',
     description: 'Trigger and download SQLite snapshots of the operational database.',
     actions: [{ action: 'create', label: 'Create Backup' }],
+  },
+  {
+    key: 'system',
+    label: 'System Control',
+    description:
+      'Master facilities reserved for the System Administrator: audit log archive/flush, the global emergency lockout and full session/password override.',
+    actions: [
+      { action: 'lockdown', label: 'Emergency Lockout' },
+      { action: 'audit_purge', label: 'Purge Audit Logs' },
+      { action: 'session_override', label: 'Session & Password Override' },
+    ],
   },
 ];
 
@@ -118,6 +129,7 @@ export const PERMISSION_INDEX = MODULES.flatMap((module) =>
 
 export const ROLE_KEYS = {
   SYSTEM_ADMIN: 'system_admin',
+  ADMIN: 'admin',
   TRANSPORT_STAFF: 'transport_staff',
   ATTENDANT: 'attendant',
 };
@@ -133,6 +145,15 @@ export const ROLE_DEFAULTS = {
       'Full system control: configuration, staff accounts, permission assignment, database backups and every operational module.',
     level: 100,
     permissions: ALL_PERMISSIONS,
+  },
+  [ROLE_KEYS.ADMIN]: {
+    label: 'Administrator',
+    description:
+      'Broad campus management across staff, students, fleets and logs. Below the System Administrator: cannot modify System Administrator accounts, role definitions or the master System Control facilities.',
+    level: 90,
+    permissions: ALL_PERMISSIONS.filter(
+      (key) => key !== 'roles:edit' && !key.startsWith('system:'),
+    ),
   },
   [ROLE_KEYS.TRANSPORT_STAFF]: {
     label: 'Resource & Transport Staff',

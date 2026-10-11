@@ -1,7 +1,7 @@
 import config from '../config/env.js';
 import { getDb } from '../db/connection.js';
 import { verifyAccessToken } from '../lib/tokens.js';
-import { unauthorized, forbidden, passwordChangeRequired } from '../lib/errors.js';
+import { unauthorized, forbidden, passwordChangeRequired, serviceLocked } from '../lib/errors.js';
 import { isExpired } from '../lib/time.js';
 import { loadUserForAuth, requiresPasswordChange } from '../services/permissions.js';
 
@@ -65,6 +65,10 @@ export function authenticate(req, res, next) {
     return next(unauthorized('Credentials have been revoked. Please sign in again.', 'TOKEN_REVOKED'));
   }
 
+  if (isLockedOut(user)) {
+    return next(serviceLocked());
+  }
+
   req.user = user;
   req.token = token;
   req.sessionId = payload.jti ?? null;
@@ -94,4 +98,38 @@ export function requirePasswordRotated(req, res, next) {
   return next(passwordChangeRequired());
 }
 
-export default { authenticate, requireAuth, requirePasswordRotated, extractToken };
+/** Master-only gate: only the Level 100 System Administrator may pass. */
+export function requireSystemAdmin(req, res, next) {
+  if (!req.user) return next(unauthorized());
+  if (req.user.role_key === 'system_admin') return next();
+  return next(
+    forbidden('This facility is reserved for the System Administrator.', {
+      code: 'SYSTEM_ADMIN_ONLY',
+    }),
+  );
+}
+
+/**
+ * The Global Emergency Lockout switch (settings key `system.lockdown`).
+ * While engaged, every non-System-Administrator session is frozen.
+ */
+export function isLockedOut(user) {
+  if (!user || user.role_key === 'system_admin') return false;
+  try {
+    const row = getDb().prepare("SELECT value FROM settings WHERE key = 'system.lockdown'").get();
+    if (!row?.value) return false;
+    const state = JSON.parse(row.value);
+    return Boolean(state?.locked);
+  } catch {
+    return false;
+  }
+}
+
+export default {
+  authenticate,
+  requireAuth,
+  requirePasswordRotated,
+  requireSystemAdmin,
+  isLockedOut,
+  extractToken,
+};

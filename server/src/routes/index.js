@@ -12,6 +12,7 @@ import simulatorRoutes from './simulator.routes.js';
 import scanRoutes from './scans.routes.js';
 import streamRoutes from './stream.routes.js';
 import settingsRoutes from './settings.routes.js';
+import adminRoutes from './admin.routes.js';
 import { getDb } from '../db/connection.js';
 import { hub } from '../services/realtime.js';
 
@@ -76,5 +77,7 @@ router.use('/stream', streamRoutes);
 // legacy /system path, so either base keeps working.
 router.use('/settings', settingsRoutes);
 router.use('/system', settingsRoutes);
+// System Control — exclusive to the Level 100 System Administrator.
+router.use('/admin', adminRoutes);
 
 export default router;

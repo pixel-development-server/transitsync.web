@@ -27,7 +27,12 @@ function RolePermissionsDialog({ open, onClose, onSaved, role, modules, allPermi
     setSelected([...role.permissions]);
   }, [open, role]);
 
-  const locked = role?.key === 'system_admin';
+  const locked = role ? role.editable === false : true;
+
+  const lockNote =
+    role?.key === 'system_admin'
+      ? 'The System Administrator role always holds every permission and cannot be edited.'
+      : 'This role sits at or above your own level. Roles can only be edited from a strictly higher seniority level.';
 
   const toggle = (permission) =>
     setSelected((current) =>
@@ -91,7 +96,7 @@ function RolePermissionsDialog({ open, onClose, onSaved, role, modules, allPermi
 
         {locked ? (
           <div className="rounded-xl bg-amber-500/[0.08] px-3.5 py-3 text-[0.76rem] leading-relaxed text-amber-300 ring-1 ring-amber-500/25">
-            The System Administrator role always holds every permission and cannot be edited.
+            {lockNote}
           </div>
         ) : null}
 
@@ -241,8 +246,8 @@ export default function Roles() {
             type="button"
             className="btn btn-ghost"
             onClick={() => setEditing(row)}
-            disabled={row.key === 'system_admin'}
-            title={row.key === 'system_admin' ? 'System Administrator is locked' : 'Edit permissions'}
+            disabled={!row.editable}
+            title={row.editable ? 'Edit permissions' : 'At or above your own level — locked by seniority'}
           >
             <Icon name="shield" className="h-3.5 w-3.5" />
             Edit

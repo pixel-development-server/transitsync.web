@@ -259,8 +259,206 @@ function BackupsPanel() {
   );
 }
 
+/**
+ * System Control — master facilities that exist for the Level 100 System
+ * Administrator only. The server enforces this with `requireSystemAdmin` on
+ * every /api/admin route; the UI simply only renders for that role.
+ */
+function SystemControlPanel() {
+  const toast = useToast();
+  const [state, setState] = useState(null);
+  const [message, setMessage] = useState('');
+  const [olderThanDays, setOlderThanDays] = useState('30');
+  const [busy, setBusy] = useState(false);
+  const [confirmPurge, setConfirmPurge] = useState(false);
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
+
+  const reload = useCallback(async () => {
+    try {
+      const response = await api.get('/admin/lockdown');
+      setState(response.data);
+    } catch {
+      // Panel only renders for system admins; a transient failure is not fatal.
+    }
+  }, []);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  const toggleLockdown = useCallback(async () => {
+    setBusy(true);
+    try {
+      await api.post('/admin/lockdown', {
+        locked: !(state?.locked ?? false),
+        message: message.trim() || undefined,
+      });
+      toast.success(state?.locked ? 'Emergency lockout cleared.' : 'Global emergency lockout engaged.');
+      setMessage('');
+      await reload();
+    } catch (caught) {
+      toast.error(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }, [state, message, reload, toast]);
+
+  const archiveAudit = useCallback(async () => {
+    setBusy(true);
+    try {
+      const filename = await download('/admin/audit/export', undefined, 'audit-archive.csv');
+      toast.success(`${filename ?? 'Audit archive'} downloaded.`);
+    } catch (caught) {
+      toast.error(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }, [toast]);
+
+  const purgeAudit = useCallback(async () => {
+    setConfirmPurge(false);
+    setBusy(true);
+    try {
+      const days = Number(olderThanDays) || 0;
+      const response = await api.post('/admin/audit/purge', { olderThanDays: days });
+      toast.success(response.data.message);
+    } catch (caught) {
+      toast.error(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }, [olderThanDays, toast]);
+
+  const revokeAll = useCallback(async () => {
+    setConfirmRevoke(false);
+    setBusy(true);
+    try {
+      const response = await api.post('/admin/sessions/revoke', { all: true });
+      toast.success(response.data.message);
+    } catch (caught) {
+      toast.error(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }, [toast]);
+
+  return (
+    <Panel
+      title="System Control"
+      subtitle="Master facilities — System Administrator only"
+      icon="shield"
+      className="mt-4"
+    >
+      <div className="grid gap-3.5 sm:grid-cols-2">
+        <section className="rounded-xl bg-[var(--surface-sunken)] px-4 py-3.5">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h4 className="text-[0.82rem] font-semibold text-mist-100">Global emergency lockout</h4>
+              <p className="mt-0.5 text-[0.72rem] leading-relaxed text-mist-500">
+                {state?.locked
+                  ? `Engaged by ${state.by ?? 'System Administrator'}${state.at ? ` · ${formatDateTime(state.at)}` : ''}. Every non-admin session is frozen.`
+                  : 'Freeze every non-System-Administrator session during maintenance.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              className={`btn ${state?.locked ? 'btn-danger' : 'btn-ghost'} shrink-0`}
+              onClick={toggleLockdown}
+              disabled={busy}
+            >
+              {state?.locked ? 'Clear lockout' : 'Engage lockout'}
+            </button>
+          </div>
+          <label className="mt-3 block">
+            <span className="text-[0.68rem] tracking-[0.05em] text-mist-500 uppercase">
+              Notice shown to blocked staff (optional)
+            </span>
+            <Input
+              value={message}
+              onChange={(event) => setMessage(event.target.value)}
+              placeholder="e.g. Scheduled maintenance until 18:00"
+              disabled={busy}
+              className="mt-1"
+            />
+          </label>
+        </section>
+
+        <section className="rounded-xl bg-[var(--surface-sunken)] px-4 py-3.5">
+          <h4 className="text-[0.82rem] font-semibold text-mist-100">Audit trail archive &amp; purge</h4>
+          <p className="mt-0.5 text-[0.72rem] leading-relaxed text-mist-500">
+            Download the full trail as a CSV, then flush entries older than the cut-off below.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button type="button" className="btn btn-ghost" onClick={archiveAudit} disabled={busy}>
+              <Icon name="download" className="h-3.5 w-3.5" />
+              Archive CSV
+            </button>
+            <div className="ml-auto flex items-center gap-2">
+              <Input
+                value={olderThanDays}
+                onChange={(event) => setOlderThanDays(event.target.value.replace(/[^\d]/g, ''))}
+                aria-label="Purge entries older than (days)"
+                className="!w-16 text-center"
+                disabled={busy}
+              />
+              <span className="cursor-default text-[0.68rem] text-mist-500">days</span>
+              <button
+                type="button"
+                className="btn btn-ghost !text-rose-300"
+                onClick={() => setConfirmPurge(true)}
+                disabled={busy}
+              >
+                Purge
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-xl bg-[var(--surface-sunken)] px-4 py-3.5 sm:col-span-2">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h4 className="text-[0.82rem] font-semibold text-mist-100">Session &amp; password override</h4>
+              <p className="mt-0.5 text-[0.72rem] leading-relaxed text-mist-500">
+                Force a password reset on any staff member — including peers and other System Administrators — without
+                seniority limits (use the reset action on a user row), or sign everyone out at once.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn btn-ghost !text-rose-300 shrink-0"
+              onClick={() => setConfirmRevoke(true)}
+              disabled={busy}
+            >
+              Revoke all sessions
+            </button>
+          </div>
+        </section>
+      </div>
+
+      <ConfirmDialog
+        open={confirmPurge}
+        onClose={() => setConfirmPurge(false)}
+        onConfirm={purgeAudit}
+        busy={busy}
+        title="Purge audit log"
+        confirmLabel="Purge entries"
+        message={`Delete every audit entry older than ${Number(olderThanDays) || 0} days? This cannot be undone — download a CSV archive first if you need the record.`}
+      />
+      <ConfirmDialog
+        open={confirmRevoke}
+        onClose={() => setConfirmRevoke(false)}
+        onConfirm={revokeAll}
+        busy={busy}
+        title="Revoke all sessions"
+        confirmLabel="Revoke all"
+        message="Every active session across every role is signed out, including other System Administrators. Your own session is kept."
+      />
+    </Panel>
+  );
+}
+
 export default function Settings() {
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const toast = useToast();
   const canEdit = can('settings:edit');
 
@@ -446,6 +644,8 @@ export default function Settings() {
           <BackupsPanel />
         </div>
       ) : null}
+
+      {user?.role === 'system_admin' ? <SystemControlPanel /> : null}
 
       <ConfirmDialog
         open={confirmSave}

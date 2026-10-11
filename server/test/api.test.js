@@ -873,10 +873,13 @@ test('roles endpoint reports headcounts and permission sets', async () => {
   const response = await call(ctx, 'GET', '/api/roles', { token: admin.token });
   assert.equal(response.status, 200);
   const roles = response.body.data.roles;
-  assert.equal(roles.length, 3);
+  assert.ok(roles.length >= 4, `expected the four system roles, got ${roles.length}`);
 
   const adminRole = roles.find((role) => role.key === 'system_admin');
   assert.ok(adminRole.permissions.length >= 20, 'admin role should hold the full catalogue');
+
+  const campusAdmin = roles.find((role) => role.key === 'admin');
+  assert.equal(campusAdmin.level, 90, 'the campus Administrator sits at level 90');
 
   const attendant = roles.find((role) => role.key === 'attendant');
   assert.ok(attendant.headcount >= 2);
