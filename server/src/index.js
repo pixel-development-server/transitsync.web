@@ -35,13 +35,17 @@ function bootstrap() {
   const applied = results.filter((entry) => entry.applied).length;
   if (applied) process.stdout.write(`  ${applied} migration(s) applied.\n`);
 
-  // Level 200 platform owner — only materialised when SUPER_ADMIN_EMAIL and
-  // SUPER_ADMIN_PASSWORD are configured. Idempotent.
-  const superAdmin = ensureSuperAdmin(db);
-  if (superAdmin?.created) {
-    process.stdout.write(
-      `  Platform Super Administrator created: ${superAdmin.email} (forced change on first sign-in).\n`,
-    );
+  // Level 200 platform owner. The operator now creates this account through the
+  // first-run wizard (so they choose their own email/name/password) or from the
+  // Super Admin console. An environment-seeded owner is only materialised when
+  // `SUPER_ADMIN_BOOTSTRAP=true` is set explicitly, for headless installs.
+  if (config.superAdmin.bootstrap) {
+    const superAdmin = ensureSuperAdmin(db);
+    if (superAdmin?.created) {
+      process.stdout.write(
+        `  Platform Super Administrator created: ${superAdmin.email} (forced change on first sign-in).\n`,
+      );
+    }
   }
 
   const admin = db

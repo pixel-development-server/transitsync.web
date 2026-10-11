@@ -71,6 +71,7 @@ export default function Setup() {
   const { data: setup, loading } = useApi('/auth/setup-status');
 
   const [form, setForm] = useState({
+    role: 'super_admin',
     institution: '',
     fullName: '',
     email: '',
@@ -133,6 +134,7 @@ export default function Setup() {
     setSubmitting(true);
     try {
       await api.post('/auth/setup', {
+        role: form.role,
         institution,
         fullName,
         email,
@@ -227,6 +229,61 @@ export default function Setup() {
           ) : (
             <form onSubmit={onSubmit} className="space-y-4 px-6 py-6 sm:px-8" noValidate>
               <FormError error={error} onDismiss={() => setError(null)} />
+
+              <div>
+                <span className="label">Account type</span>
+                <div className="mt-1.5 grid grid-cols-1 gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Account type">
+                  {[
+                    {
+                      key: 'super_admin',
+                      title: 'Platform Super Administrator',
+                      hint: 'Multi-campus owner. Provisions colleges and their administrators, and manages the whole platform.',
+                    },
+                    {
+                      key: 'system_admin',
+                      title: 'Campus System Administrator',
+                      hint: 'Single-campus master. Manages one institution directly, with no platform-wide controls.',
+                    },
+                  ].map((option) => {
+                    const selected = form.role === option.key;
+                    return (
+                      <button
+                        key={option.key}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        onClick={() => setForm((current) => ({ ...current, role: option.key }))}
+                        disabled={disabled}
+                        className={`rounded-xl border px-3.5 py-3 text-left transition ${
+                          selected
+                            ? 'border-sky-400/60 bg-sky-500/10'
+                            : 'border-[var(--border-subtle)] bg-[var(--glass-fill)] hover:border-sky-400/40'
+                        }`}
+                      >
+                        <span className="flex items-center gap-2">
+                          <span
+                            className={`grid h-4 w-4 shrink-0 place-items-center rounded-full border ${
+                              selected ? 'border-sky-400' : 'border-[var(--color-mist-500)]'
+                            }`}
+                          >
+                            {selected ? <span className="h-2 w-2 rounded-full bg-sky-400" /> : null}
+                          </span>
+                          <span
+                            className={`text-[0.82rem] font-semibold ${
+                              selected ? 'text-sky-300' : 'text-[var(--color-mist-200)]'
+                            }`}
+                          >
+                            {option.title}
+                          </span>
+                        </span>
+                        <span className="mt-1 block pl-6 text-[0.72rem] leading-relaxed text-[var(--color-mist-500)]">
+                          {option.hint}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
               <Input
                 label="Institution name"
@@ -356,7 +413,9 @@ export default function Setup() {
                 ) : (
                   <>
                     <Icon name="shield" className="h-4 w-4" />
-                    Create Master Administrator
+                    {form.role === 'system_admin'
+                      ? 'Create Campus Administrator'
+                      : 'Create Platform Owner'}
                   </>
                 )}
               </button>

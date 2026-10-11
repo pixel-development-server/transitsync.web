@@ -13,6 +13,7 @@ import {
   StatusBadge,
 } from '../components/ui.jsx';
 import { FormError, FormGrid, Input } from '../components/form.jsx';
+import SecuritySettings from '../components/SecuritySettings.jsx';
 import { api } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
 import { useApi } from '../lib/hooks.js';
@@ -325,6 +326,8 @@ export default function Profile() {
               </div>
             </form>
           </Panel>
+
+          {user.roleLevel >= 200 ? <SecuritySettings /> : null}
 
           <Panel
             title="Active sessions"

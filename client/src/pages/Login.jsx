@@ -81,7 +81,7 @@ const SUBMIT_CLASS =
  * for an invited account that has never had one.
  */
 export default function Login() {
-  const { signIn, establishSession, isAuthenticated, mustChangePassword, loading } = useAuth();
+  const { establishSession, isAuthenticated, mustChangePassword, loading } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const toast = useToast();
@@ -118,8 +118,15 @@ export default function Login() {
   const [submitting, setSubmitting] = useState(false);
   const [timedOut, setTimedOut] = useState(false);
 
+  // Platform-owner second factor. Once the password is accepted the server
+  // returns a short-lived challenge (not a session), and sign-in finishes here.
+  const [challenge, setChallenge] = useState(null);
+  const [code, setCode] = useState('');
+  const [resending, setResending] = useState(false);
+
   const emailRef = useRef(null);
   const passwordRef = useRef(null);
+  const codeRef = useRef(null);
 
   const { data: setup } = useApi('/auth/setup-status');
   const minLength = setup?.passwordPolicy?.minLength ?? 10;
@@ -185,7 +192,10 @@ export default function Login() {
       emailRef.current?.focus();
       return undefined;
     }
-    const timer = setTimeout(() => passwordRef.current?.focus(), 340);
+    const timer = setTimeout(() => {
+      if (step === 'twofactor') codeRef.current?.focus();
+      else passwordRef.current?.focus();
+    }, 340);
     return () => clearTimeout(timer);
   }, [step]);
 
@@ -207,6 +217,8 @@ export default function Login() {
     setSlide('left');
     setStep('email');
     setError(null);
+    setChallenge(null);
+    setCode('');
     setForgotHint(false);
     setShowPassword(false);
     setShowConfirmPassword(false);
@@ -222,6 +234,8 @@ export default function Login() {
     setStep('email');
     setError(null);
     setEmailError(null);
+    setChallenge(null);
+    setCode('');
     setForgotHint(false);
     setShowPassword(false);
     setShowConfirmPassword(false);
@@ -283,13 +297,84 @@ export default function Login() {
 
     setSubmitting(true);
     try {
-      await signIn(email, password, rememberMe);
+      const response = await api.post('/auth/login', { email, password, rememberMe });
+      const data = response.data;
+
+      // The platform owner carries a second factor: the server hands back a
+      // short-lived challenge instead of a session, and we finish on Step 3.
+      if (data?.twoFactorRequired) {
+        setChallenge(data);
+        setCode('');
+        setSlide('right');
+        setStep('twofactor');
+        if (data.method === 'EMAIL') {
+          toast.info(
+            data.delivered
+              ? `We emailed a 6-digit code to ${data.email}.`
+              : `A 6-digit code was generated for ${data.email} — check the server console.`,
+            { title: 'Verification code sent' },
+          );
+        }
+        return;
+      }
+
+      await establishSession(data);
       navigate(isStudent ? '/student/dashboard' : '/', { replace: true });
     } catch (caught) {
       setError(caught);
       setPassword('');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const onVerifyCode = async (event) => {
+    event.preventDefault();
+    setError(null);
+    const value = code.trim();
+    if (!value) return setError({ message: 'Enter the code from your authenticator or email.' });
+
+    setSubmitting(true);
+    try {
+      const response = await api.post('/auth/2fa/verify', {
+        challengeId: challenge?.challengeId,
+        code: value,
+      });
+      await establishSession(response.data);
+      toast.success('Two-factor verification complete. Welcome aboard.', {
+        title: 'Identity confirmed',
+      });
+      navigate(isStudent ? '/student/dashboard' : '/', { replace: true });
+    } catch (caught) {
+      setError(caught);
+      setCode('');
+      // An expired or superseded challenge cannot be retried — send the user
+      // back to the password step rather than letting them hammer a dead id.
+      if (caught?.code === 'TWO_FACTOR_EXPIRED' || caught?.code === 'TWO_FACTOR_UNAVAILABLE') {
+        setChallenge(null);
+        setStep('password');
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const onResendCode = async () => {
+    if (!challenge) return;
+    setResending(true);
+    try {
+      const response = await api.post('/auth/2fa/resend', { challengeId: challenge.challengeId });
+      setChallenge((current) => ({ ...current, delivered: response.data?.delivered ?? false }));
+      toast.success(
+        response.data?.delivered
+          ? 'We sent a fresh code to your email.'
+          : 'A fresh code was generated — check the server console.',
+        { title: 'Code sent' },
+      );
+    } catch (caught) {
+      toast.error(caught.message);
+    } finally {
+      setResending(false);
     }
   };
 
@@ -504,7 +589,15 @@ export default function Login() {
 
               <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border border-slate-100 bg-white text-blue-700 shadow-md">
                 <Icon
-                  name={step === 'email' ? (isStudent ? 'students' : 'user') : step === 'setup' ? 'key' : 'lock'}
+                  name={
+                    step === 'email'
+                      ? (isStudent ? 'students' : 'user')
+                      : step === 'twofactor'
+                        ? 'shield'
+                        : step === 'setup'
+                          ? 'key'
+                          : 'lock'
+                  }
                   className="h-7 w-7"
                   strokeWidth={2}
                 />
@@ -513,20 +606,26 @@ export default function Login() {
               <h1 className="mt-5 text-center text-3xl font-extrabold tracking-tight text-slate-900">
                 {step === 'email'
                   ? (isStudent ? 'Student Portal' : 'Staff Sign-In')
-                  : step === 'setup'
-                    ? (isStudent ? 'Activate your pass' : 'Set your password')
-                    : 'Welcome back'}
+                  : step === 'twofactor'
+                    ? "Verify it's you"
+                    : step === 'setup'
+                      ? (isStudent ? 'Activate your pass' : 'Set your password')
+                      : 'Welcome back'}
               </h1>
               <p className="mt-1 mb-6 text-center text-sm text-slate-500">
                 {step === 'email'
                   ? (isStudent
                       ? 'Access your route, bus and live shuttle status for your campus.'
                       : 'Sign in to your campus shuttle operations console.')
-                  : step === 'setup'
-                    ? (isStudent
-                        ? 'Create the password you will use to reach your rider dashboard.'
-                        : 'First time here? Create the password you will use from now on.')
-                    : 'Enter your password to continue.'}
+                  : step === 'twofactor'
+                    ? (challenge?.method === 'EMAIL'
+                        ? `Enter the 6-digit code we sent to ${challenge?.email}.`
+                        : 'Enter the 6-digit code from your authenticator app.')
+                    : step === 'setup'
+                      ? (isStudent
+                          ? 'Create the password you will use to reach your rider dashboard.'
+                          : 'First time here? Create the password you will use from now on.')
+                      : 'Enter your password to continue.'}
               </p>
 
               {maintenanceMode ? (
@@ -682,7 +781,63 @@ export default function Login() {
                       </span>
                     </button>
 
-                    {step === 'setup' ? (
+                    {step === 'twofactor' ? (
+                      <form onSubmit={onVerifyCode} className="space-y-4" noValidate>
+                        <div
+                          role="status"
+                          className="flex items-start gap-2.5 rounded-xl border border-blue-200 bg-blue-50 px-3.5 py-2.5 text-[0.78rem] text-blue-800"
+                        >
+                          <Icon name="shield" className="mt-px h-4 w-4 shrink-0 text-blue-600" />
+                          <p>
+                            <span className="font-semibold">Two-factor protection:</span>{' '}
+                            {challenge?.method === 'EMAIL'
+                              ? `We emailed a one-time code to ${challenge?.email}. It expires in a few minutes.`
+                              : 'Open your authenticator app and enter the current 6-digit code. A one-time recovery code works here too.'}
+                          </p>
+                        </div>
+
+                        <div>
+                          <label htmlFor="login-code" className={LABEL_CLASS}>
+                            Verification code
+                          </label>
+                          <input
+                            id="login-code"
+                            ref={codeRef}
+                            type="text"
+                            name="one-time-code"
+                            inputMode="text"
+                            autoComplete="one-time-code"
+                            autoCapitalize="characters"
+                            placeholder="123456"
+                            value={code}
+                            onChange={(event) => setCode(event.target.value)}
+                            disabled={submitting}
+                            required
+                            className={`${INPUT_CLASS} font-mono tracking-[0.3em]`}
+                          />
+                        </div>
+
+                        <button type="submit" disabled={submitting} className={SUBMIT_CLASS}>
+                          {submitting ? (
+                            <Spinner className="h-4 w-4" />
+                          ) : (
+                            <Icon name="shield" className="h-4 w-4" />
+                          )}
+                          <span>{submitting ? 'Verifying…' : 'Verify & Sign In'}</span>
+                        </button>
+
+                        {challenge?.method === 'EMAIL' ? (
+                          <button
+                            type="button"
+                            onClick={onResendCode}
+                            disabled={resending || submitting}
+                            className="w-full text-center text-sm font-medium text-blue-600 hover:underline disabled:opacity-60"
+                          >
+                            {resending ? 'Sending a new code…' : 'Resend code'}
+                          </button>
+                        ) : null}
+                      </form>
+                    ) : step === 'setup' ? (
                       <form onSubmit={onCreatePassword} className="space-y-4" noValidate>
                         <div
                           role="status"

@@ -6,11 +6,28 @@ import { getDb } from '../db/connection.js';
 import { asyncHandler, validate } from '../lib/http.js';
 import { hashPassword, verifyPassword, checkPasswordPolicy, isPasswordSet } from '../lib/password.js';
 import { issueAccessToken, newSessionId, tokenExpiry } from '../lib/tokens.js';
+import { generateSecret, verifyCode, buildOtpAuthUrl } from '../lib/totp.js';
 import AppError, { unauthorized, badRequest, conflict, accountLocked, unprocessable, maintenanceMode } from '../lib/errors.js';
 import { parseSqliteDate, parseDurationMs } from '../lib/time.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireSuperAdmin } from '../middleware/auth.js';
 import { loadUserForAuth, requiresPasswordChange } from '../services/permissions.js';
 import { recordAudit, clientIp } from '../services/audit.js';
+import {
+  isTwoFactorSubject,
+  twoFactorEnabled,
+  maskEmail,
+  generateRecoveryCodes,
+  storeRecoveryCodes,
+  remainingRecoveryCodes,
+  createChallenge,
+  getChallenge,
+  consumeChallenge,
+  recordChallengeFailure,
+  issueEmailOtp,
+  verifyEmailOtp,
+  verifyChallengeCode,
+} from '../services/twoFactor.js';
+import { mailDeliverable } from '../services/mailer.js';
 import {
   getMaintenance,
   getInstitutionMaintenance,
@@ -27,6 +44,12 @@ import {
   setupSchema,
   changePasswordSchema,
   updateProfileSchema,
+  changeEmailSchema,
+  twoFactorSetupSchema,
+  twoFactorEnableSchema,
+  twoFactorVerifySchema,
+  twoFactorResendSchema,
+  twoFactorDisableSchema,
 } from '../validation/schemas.js';
 
 const router = express.Router();
@@ -218,13 +241,26 @@ router.post(
       throw conflict('TransitSync is already initialised. Sign in with your administrator account.');
     }
 
-    const { email, password, confirmPassword, fullName, institution, phone } = req.body;
+    const { email, password, confirmPassword, fullName, institution, phone, role: requestedRole } = req.body;
     if (password !== confirmPassword) throw unprocessable('Passwords do not match.', [{ field: 'confirmPassword', message: 'Passwords do not match' }]);
 
     const policy = checkPasswordPolicy(password, { email, fullName });
     if (!policy.valid) throw unprocessable('Password does not meet the policy.', policy.errors.map((message) => ({ field: 'password', message })));
 
-    const role = db.prepare('SELECT id FROM roles WHERE key = ?').get(ROLE_KEYS.SYSTEM_ADMIN);
+    // The first master account is either the multi-campus platform owner
+    // (Level 200, no tenant) or the single-campus System Administrator
+    // (Level 100). The wizard lets the operator choose; the default is the
+    // platform owner, which is what a multi-tenant deployment needs first and
+    // what lets the operator define their own email/name rather than inheriting
+    // them from the environment.
+    const isPlatformOwner = requestedRole !== 'system_admin';
+    const roleKey = isPlatformOwner ? ROLE_KEYS.SUPER_ADMIN : ROLE_KEYS.SYSTEM_ADMIN;
+    const jobTitle = isPlatformOwner ? 'Platform Super Administrator' : 'System Administrator';
+    const department = isPlatformOwner ? 'Platform' : 'Administration';
+
+    const role = db.prepare('SELECT id FROM roles WHERE key = ?').get(roleKey);
+    if (!role) throw badRequest('That role is not available on this deployment.');
+
     const passwordHash = await hashPassword(password);
 
     const result = db
@@ -232,9 +268,9 @@ router.post(
         `INSERT INTO users
            (email, full_name, password_hash, phone, job_title, department, role_id,
             is_first_login, password_changed, force_password_reset, permissions_mode)
-         VALUES (?, ?, ?, ?, 'System Administrator', 'Administration', ?, 0, 1, 0, 'INHERIT')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, 0, 'INHERIT')`,
       )
-      .run(email, fullName, passwordHash, phone ?? null, role.id);
+      .run(email, fullName, passwordHash, phone ?? null, jobTitle, department, role.id);
 
     db.prepare("INSERT OR REPLACE INTO system_meta (key, value, updated_at) VALUES ('institution_name', ?, datetime('now'))").run(institution);
     db.prepare("INSERT OR REPLACE INTO system_meta (key, value, updated_at) VALUES ('initialised_at', datetime('now'), datetime('now'))").run();
@@ -358,6 +394,41 @@ router.post(
     const valid = await verifyPassword(password, row.password_hash);
     if (!valid) fail('Incorrect email or password.');
 
+    // Platform-owner second factor. Only the Level 200 Super Administrator is
+    // ever challenged; every other role proceeds straight to a session exactly
+    // as before. The challenge is created only *after* the password is proven,
+    // so an anonymous caller cannot use this branch to probe whether 2FA is on
+    // for a given account.
+    if (row.two_factor_enabled && row.two_factor_method && level >= SUPER_ADMIN_LEVEL) {
+      const method = row.two_factor_method === 'EMAIL' ? 'EMAIL' : 'TOTP';
+      const challenge = createChallenge(db, row, {
+        method,
+        remember: Boolean(remember),
+        ip,
+        userAgent: String(req.headers['user-agent'] ?? '').slice(0, 400),
+        device: parseDevice(req.headers['user-agent']),
+      });
+
+      let delivery = null;
+      if (method === 'EMAIL') delivery = await issueEmailOtp(db, row);
+
+      db.prepare('UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = ?').run(row.id);
+      recordAudit({ userId: row.id, actorEmail: email, action: 'auth.login_2fa', ip, status: 'challenge' });
+
+      res.json({
+        success: true,
+        data: {
+          twoFactorRequired: true,
+          challengeId: challenge.id,
+          method,
+          email: maskEmail(row.email),
+          delivered: delivery ? delivery.delivered : null,
+          expiresAt: challenge.expiresAt,
+        },
+      });
+      return;
+    }
+
     const user = db
       .prepare(
         `SELECT u.*, r.key AS role_key, r.name AS role_name, r.level AS role_level
@@ -390,6 +461,94 @@ router.post(
         mustChangePassword: requiresPasswordChange(principal),
         user: publicUser(principal),
       },
+    });
+  }),
+);
+
+/**
+ * Step 2 of the two-step sign-in for a platform owner.
+ *
+ * Public by necessity — the caller holds only the short-lived `challengeId`
+ * minted by `/login`. Single-use and attempt-limited: it accepts the enrolled
+ * factor's code (authenticator or email) or a one-time recovery code, and on
+ * success mints the real session.
+ */
+router.post(
+  '/2fa/verify',
+  loginLimiter,
+  validate(twoFactorVerifySchema),
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    const { challengeId, code } = req.body;
+    const ip = clientIp(req);
+
+    const challenge = getChallenge(db, challengeId);
+    if (!challenge) throw unauthorized('This verification session has expired. Sign in again.', 'TWO_FACTOR_EXPIRED');
+
+    const user = db
+      .prepare(
+        `SELECT u.*, r.key AS role_key, r.name AS role_name, r.level AS role_level
+           FROM users u LEFT JOIN roles r ON r.id = u.role_id WHERE u.id = ?`,
+      )
+      .get(challenge.user_id);
+
+    if (!user || !isTwoFactorSubject(user) || !twoFactorEnabled(user)) {
+      consumeChallenge(db, challengeId);
+      throw unauthorized(
+        'Two-factor authentication is no longer available for this account. Sign in again.',
+        'TWO_FACTOR_UNAVAILABLE',
+      );
+    }
+
+    const result = verifyChallengeCode(db, user, challenge, code);
+    if (!result.ok) {
+      recordChallengeFailure(db, challengeId);
+      recordAudit({ userId: user.id, actorEmail: user.email, action: 'auth.login_2fa', ip, status: 'failure' });
+      throw unauthorized('That code is not valid. Try again.', 'INVALID_TWO_FACTOR_CODE');
+    }
+
+    consumeChallenge(db, challengeId);
+    const session = createSession(db, user, req, { remember: Boolean(challenge.remember) });
+    setAuthCookie(req, res, session.token, session.expiresAt);
+
+    db.prepare(
+      `UPDATE users SET failed_login_count = 0, locked_until = NULL,
+                        last_login_at = datetime('now'), last_login_ip = ? WHERE id = ?`,
+    ).run(ip, user.id);
+
+    recordAudit({ userId: user.id, actorEmail: user.email, action: 'auth.login_2fa', ip, detail: { via: result.via } });
+
+    const principal = loadUserForAuth(db, user.id);
+    res.json({
+      success: true,
+      data: {
+        token: session.token,
+        expiresAt: session.expiresAt,
+        sessionId: session.sessionId,
+        mustChangePassword: requiresPasswordChange(principal),
+        user: publicUser(principal, { twoFactorEnabled: true, twoFactorMethod: user.two_factor_method }),
+      },
+    });
+  }),
+);
+
+/** Re-send an emailed verification code for a still-pending challenge. */
+router.post(
+  '/2fa/resend',
+  probeLimiter,
+  validate(twoFactorResendSchema),
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    const challenge = getChallenge(db, req.body.challengeId);
+    if (!challenge || challenge.method !== 'EMAIL') throw badRequest('No email verification is pending.');
+
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(challenge.user_id);
+    if (!user) throw badRequest('This verification session is no longer valid.');
+
+    const delivery = await issueEmailOtp(db, user);
+    res.json({
+      success: true,
+      data: { delivered: delivery.delivered, channel: delivery.channel, email: maskEmail(user.email) },
     });
   }),
 );
@@ -789,6 +948,206 @@ router.patch(
 
     recordAudit({ userId: req.user.id, actorEmail: req.user.email, action: 'auth.profile_update', entity: 'user', entityId: req.user.id, ip: clientIp(req) });
     res.json({ success: true, data: { user: publicUser(loadUserForAuth(db, updated.id)) } });
+  }),
+);
+
+/**
+ * Self-service email change.
+ *
+ * Email is the sign-in identity, so it is re-proven with the current password
+ * and kept unique across the platform. The `tv` (token version) claim is bumped,
+ * which invalidates every *other* live session; the caller's own token is then
+ * re-minted so they stay signed in.
+ */
+router.post(
+  '/change-email',
+  requireAuth,
+  validate(changeEmailSchema),
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    const { newEmail, currentPassword } = req.body;
+
+    const row = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    if (!(await verifyPassword(currentPassword, row.password_hash))) {
+      recordAudit({ userId: row.id, actorEmail: row.email, action: 'auth.email_change', ip: clientIp(req), status: 'failure' });
+      throw unauthorized('Your password is incorrect.', 'INVALID_CREDENTIALS');
+    }
+    if (newEmail === row.email) throw badRequest('That is already your email address.');
+
+    const clash = db.prepare('SELECT id FROM users WHERE email = ? AND id <> ?').get(newEmail, row.id);
+    if (clash) throw conflict('Another account already uses that email address.');
+
+    db.transaction(() => {
+      db.prepare("UPDATE users SET email = ?, token_version = token_version + 1, updated_at = datetime('now') WHERE id = ?").run(newEmail, row.id);
+      db.prepare('DELETE FROM login_sessions WHERE user_id = ? AND id <> ?').run(row.id, req.sessionId ?? '');
+    });
+
+    const fresh = db
+      .prepare(
+        `SELECT u.*, r.key AS role_key, r.name AS role_name, r.level AS role_level
+           FROM users u LEFT JOIN roles r ON r.id = u.role_id WHERE u.id = ?`,
+      )
+      .get(row.id);
+    const token = issueAccessToken({
+      userId: fresh.id,
+      email: fresh.email,
+      roleKey: fresh.role_key,
+      tokenVersion: fresh.token_version,
+      sessionId: req.sessionId,
+    });
+    const expiresAt = tokenExpiry(token);
+    setAuthCookie(req, res, token, expiresAt);
+
+    recordAudit({ userId: row.id, actorEmail: newEmail, action: 'auth.email_change', entity: 'user', entityId: row.id, ip: clientIp(req), detail: { from: row.email } });
+
+    res.json({ success: true, data: { token, expiresAt, user: publicUser(loadUserForAuth(db, fresh.id)) } });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Platform-owner two-factor authentication
+//
+// Scoped to the Level 200 Super Administrator. The status endpoint answers for
+// any authenticated caller (so the UI can hide the panel), while enrolment and
+// removal are gated to the owner. Campus roles never carry a second factor, so
+// this can never lock a campus out of its own console.
+// ---------------------------------------------------------------------------
+router.get(
+  '/2fa/status',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const user = req.user;
+    res.json({
+      success: true,
+      data: {
+        subject: isTwoFactorSubject(user),
+        enabled: twoFactorEnabled(user),
+        method: user.two_factor_method ?? null,
+        email: maskEmail(user.email),
+        recoveryCodesRemaining: twoFactorEnabled(user) ? remainingRecoveryCodes(user) : 0,
+        available: { totp: true, email: mailDeliverable() },
+      },
+    });
+  }),
+);
+
+/** Begin enrolment: mint a TOTP secret, or send an email code to verify. */
+router.post(
+  '/2fa/setup',
+  requireAuth,
+  requireSuperAdmin,
+  validate(twoFactorSetupSchema),
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    const { method } = req.body;
+
+    if (method === 'TOTP') {
+      const secret = generateSecret();
+      db.prepare("UPDATE users SET totp_secret = ?, updated_at = datetime('now') WHERE id = ?").run(secret, req.user.id);
+      recordAudit({ userId: req.user.id, actorEmail: req.user.email, action: 'auth.2fa_setup', ip: clientIp(req), detail: { method } });
+      return res.json({
+        success: true,
+        data: {
+          method: 'TOTP',
+          secret,
+          otpauthUrl: buildOtpAuthUrl({ secret, label: req.user.email, issuer: 'TransitSync' }),
+        },
+      });
+    }
+
+    if (method === 'EMAIL' && !mailDeliverable() && !config.isTest) {
+      throw badRequest('Email delivery is not configured on this server. Use an authenticator app instead.');
+    }
+    const delivery = await issueEmailOtp(db, req.user, { purpose: 'ENROLL_2FA' });
+    recordAudit({ userId: req.user.id, actorEmail: req.user.email, action: 'auth.2fa_setup', ip: clientIp(req), detail: { method } });
+    res.json({
+      success: true,
+      data: { method: 'EMAIL', delivered: delivery.delivered, channel: delivery.channel, email: maskEmail(req.user.email) },
+    });
+  }),
+);
+
+/** Confirm enrolment with a code, switch the factor on, and mint recovery codes. */
+router.post(
+  '/2fa/enable',
+  requireAuth,
+  requireSuperAdmin,
+  validate(twoFactorEnableSchema),
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    const { method, code } = req.body;
+
+    if (method === 'TOTP') {
+      const row = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
+      if (!row?.totp_secret) throw badRequest('Start the authenticator setup first.');
+      if (!verifyCode(row.totp_secret, code)) {
+        recordAudit({ userId: req.user.id, actorEmail: req.user.email, action: 'auth.2fa_enable', ip: clientIp(req), status: 'failure' });
+        throw unauthorized('That code is not valid. Check your authenticator app and try again.', 'INVALID_TWO_FACTOR_CODE');
+      }
+    } else if (!verifyEmailOtp(db, req.user.id, code, 'ENROLL_2FA')) {
+      recordAudit({ userId: req.user.id, actorEmail: req.user.email, action: 'auth.2fa_enable', ip: clientIp(req), status: 'failure' });
+      throw unauthorized('That code is not valid or has expired.', 'INVALID_TWO_FACTOR_CODE');
+    }
+
+    const recoveryCodes = generateRecoveryCodes();
+    db.transaction(() => {
+      db.prepare(
+        `UPDATE users SET two_factor_method = ?, two_factor_enabled = 1,
+                          two_factor_confirmed_at = datetime('now'), updated_at = datetime('now')
+          WHERE id = ?`,
+      ).run(method, req.user.id);
+      storeRecoveryCodes(db, req.user.id, recoveryCodes);
+    });
+
+    recordAudit({ userId: req.user.id, actorEmail: req.user.email, action: 'auth.2fa_enabled', ip: clientIp(req), detail: { method } });
+    res.json({ success: true, data: { enabled: true, method, recoveryCodes } });
+  }),
+);
+
+/** Turn the second factor off. Requires the account password. */
+router.post(
+  '/2fa/disable',
+  requireAuth,
+  requireSuperAdmin,
+  validate(twoFactorDisableSchema),
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id);
+    if (!(await verifyPassword(req.body.password, row.password_hash))) {
+      recordAudit({ userId: req.user.id, actorEmail: req.user.email, action: 'auth.2fa_disable', ip: clientIp(req), status: 'failure' });
+      throw unauthorized('Your password is incorrect.', 'INVALID_CREDENTIALS');
+    }
+
+    db.prepare(
+      `UPDATE users SET two_factor_enabled = 0, two_factor_method = NULL, totp_secret = NULL,
+                        two_factor_confirmed_at = NULL, recovery_codes = NULL, updated_at = datetime('now')
+        WHERE id = ?`,
+    ).run(req.user.id);
+
+    recordAudit({ userId: req.user.id, actorEmail: req.user.email, action: 'auth.2fa_disabled', ip: clientIp(req) });
+    res.json({ success: true, data: { enabled: false, method: null } });
+  }),
+);
+
+/** Regenerate the one-time recovery codes (the previous set is destroyed). */
+router.post(
+  '/2fa/recovery-codes',
+  requireAuth,
+  requireSuperAdmin,
+  validate(twoFactorDisableSchema),
+  asyncHandler(async (req, res) => {
+    const db = getDb();
+    if (!twoFactorEnabled(req.user)) throw badRequest('Enable two-factor authentication first.');
+
+    const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id);
+    if (!(await verifyPassword(req.body.password, row.password_hash))) {
+      throw unauthorized('Your password is incorrect.', 'INVALID_CREDENTIALS');
+    }
+
+    const recoveryCodes = generateRecoveryCodes();
+    storeRecoveryCodes(db, req.user.id, recoveryCodes);
+    recordAudit({ userId: req.user.id, actorEmail: req.user.email, action: 'auth.2fa_recovery_codes', ip: clientIp(req) });
+    res.json({ success: true, data: { recoveryCodes } });
   }),
 );
 

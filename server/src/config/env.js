@@ -97,14 +97,34 @@ export const config = {
   },
 
   /**
-   * Level 200 Platform Super Administrator. Created once on boot only when BOTH
-   * the email and password are set, then forced to rotate on first sign-in. Left
-   * unset by default so no well-known platform credential is ever shipped.
+   * Level 200 Platform Super Administrator.
+   *
+   * The platform owner is now created by the first-run wizard, so the operator
+   * chooses their own email/name/password rather than inheriting a value from
+   * the environment. Headless installs that still want an environment-seeded
+   * owner can opt in with `SUPER_ADMIN_BOOTSTRAP=true`; the account is then
+   * created once (when none exists) and forced to rotate on first sign-in.
    */
   superAdmin: {
     email: (process.env.SUPER_ADMIN_EMAIL || '').trim().toLowerCase() || null,
     password: process.env.SUPER_ADMIN_PASSWORD || null,
     name: process.env.SUPER_ADMIN_NAME || 'Platform Super Administrator',
+    bootstrap: String(process.env.SUPER_ADMIN_BOOTSTRAP || '').toLowerCase() === 'true',
+  },
+
+  /**
+   * Outbound SMTP for the email one-time-code second factor. Entirely optional:
+   * with no `SMTP_HOST` the code is written to the server console instead of
+   * being delivered, so the email factor still works on a single-operator box.
+   */
+  mail: {
+    enabled: Boolean(process.env.SMTP_HOST),
+    host: process.env.SMTP_HOST || '',
+    port: toInt(process.env.SMTP_PORT, 587),
+    secure: String(process.env.SMTP_SECURE || '').toLowerCase() === 'true',
+    user: process.env.SMTP_USER || '',
+    pass: process.env.SMTP_PASS || '',
+    from: process.env.MAIL_FROM || 'TransitSync <no-reply@transitsync.local>',
   },
 
   /**

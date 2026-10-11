@@ -77,6 +77,11 @@ export const setupSchema = z.object({
   fullName: trimmed(2, 120),
   institution: trimmed(2, 160),
   phone: optionalText(40),
+  // Which master account to create: the Level 200 platform owner (multi-campus)
+  // or the Level 100 campus System Administrator (single campus). Defaults to
+  // the platform owner, which is the correct first account for a multi-tenant
+  // deployment.
+  role: z.enum(['super_admin', 'system_admin']).optional().default('super_admin'),
 });
 
 export const changePasswordSchema = z
@@ -100,6 +105,42 @@ export const updateProfileSchema = z.object({
   phone: optionalText(40),
   department: optionalText(120),
   jobTitle: optionalText(120),
+});
+
+/**
+ * Self-service email change. Email is the sign-in identity, so it is guarded by
+ * the current password rather than being a free-form profile field.
+ */
+export const changeEmailSchema = z.object({
+  newEmail: z.string().trim().toLowerCase().email('Enter a valid email address'),
+  currentPassword: z.string().min(1, 'Password is required'),
+});
+
+// ---------------------------------------------------------------------------
+// Platform-owner two-factor authentication
+// ---------------------------------------------------------------------------
+const sixDigitCode = z.string().trim().min(4).max(20);
+
+export const twoFactorSetupSchema = z.object({
+  method: z.enum(['TOTP', 'EMAIL']),
+});
+
+export const twoFactorEnableSchema = z.object({
+  method: z.enum(['TOTP', 'EMAIL']),
+  code: sixDigitCode,
+});
+
+export const twoFactorVerifySchema = z.object({
+  challengeId: z.string().trim().uuid(),
+  code: sixDigitCode,
+});
+
+export const twoFactorResendSchema = z.object({
+  challengeId: z.string().trim().uuid(),
+});
+
+export const twoFactorDisableSchema = z.object({
+  password: z.string().min(1, 'Password is required'),
 });
 
 // ---------------------------------------------------------------------------
@@ -457,6 +498,12 @@ export const schemas = {
   setupSchema,
   changePasswordSchema,
   updateProfileSchema,
+  changeEmailSchema,
+  twoFactorSetupSchema,
+  twoFactorEnableSchema,
+  twoFactorVerifySchema,
+  twoFactorResendSchema,
+  twoFactorDisableSchema,
   createUserSchema,
   updateUserSchema,
   assignPermissionsSchema,
