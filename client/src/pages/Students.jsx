@@ -28,10 +28,7 @@ import { useApi, useDebounced, usePagination } from '../lib/hooks.js';
 import { useToast } from '../lib/toast.jsx';
 import { formatDateTime, formatRelative } from '../lib/format.js';
 
-const FACULTIES = [
-  'Applied Science', 'Architecture', 'Business', 'Computer Science', 'Education',
-  'Engineering', 'Humanities', 'Law', 'Management', 'Microbiology', 'Science',
-];
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const CARD_STATUSES = ['UNASSIGNED', 'ISSUED', 'ACTIVE', 'REVOKED'];
 
@@ -53,7 +50,7 @@ const EMPTY_FORM = {
 };
 
 /** Create / edit dialog. Numeric selects must send `null`, not `""`. */
-function StudentDialog({ open, onClose, onSaved, student, buses, routes }) {
+function StudentDialog({ open, onClose, onSaved, student, buses, routes, faculties = [] }) {
   const toast = useToast();
   const [form, setForm] = useState(EMPTY_FORM);
   const [error, setError] = useState(null);
@@ -87,6 +84,19 @@ function StudentDialog({ open, onClose, onSaved, student, buses, routes }) {
   const onSubmit = async (event) => {
     event.preventDefault();
     setError(null);
+
+    // Strict email gate: an address that cannot contain `@` (or a bare `@`
+    // without a real domain) is rejected inline. The server re-validates
+    // authoritatively. Optional field — empty stays allowed.
+    const emailValue = String(form.email ?? '').trim().toLowerCase();
+    if (emailValue && !EMAIL_RE.test(emailValue)) {
+      setError({
+        message: 'Check the highlighted fields.',
+        fieldErrors: { email: "Please enter a valid email address containing '@' (e.g., student@iic.edu.np)." },
+      });
+      return;
+    }
+
     setSaving(true);
 
     // Empty strings would fail `emptyToNull` coercion for numbers; send null.
@@ -200,15 +210,25 @@ function StudentDialog({ open, onClose, onSaved, student, buses, routes }) {
               placeholder="+977 98XXXXXXXX"
               disabled={saving}
             />
-            <Select
-              label="Faculty"
+            <Input
+              label="Faculty / program"
               value={form.faculty}
               onChange={set('faculty')}
               error={fieldErrors.faculty}
-              options={FACULTIES}
-              placeholder="Select faculty"
+              placeholder="Type one, e.g. B.Sc. Cybersecurity, BBA, BIT"
+              list="student-faculty-options"
               disabled={saving}
-            />
+            >
+              <datalist id="student-faculty-options">
+                {faculties.map((faculty) => (
+                  <option key={faculty} value={faculty} />
+                ))}
+              </datalist>
+              <p className="mt-1.5 flex items-start gap-1.5 text-[0.7rem] leading-relaxed text-mist-500">
+                <Icon name="info" className="mt-px h-3 w-3 shrink-0" />
+                Any faculty this campus runs is accepted — previously used ones appear as suggestions.
+              </p>
+            </Input>
           </FormGrid>
         </section>
 
@@ -343,6 +363,17 @@ export default function Students() {
 
   const students = data?.students ?? [];
   const meta = data?.meta;
+
+  // Faculties used anywhere on campus, fed into the creatable faculty box.
+  const facultyOptions = useMemo(() => {
+    const seen = new Set();
+    for (const entry of summary?.byFaculty ?? []) {
+      const name = String(entry?.faculty ?? '').trim();
+      if (name && name !== 'Unassigned' && !seen.has(name)) seen.add(name);
+    }
+    if (editing?.faculty) seen.add(editing.faculty);
+    return [...seen].sort((a, b) => a.localeCompare(b));
+  }, [summary, editing]);
 
   const clearFilters = () => {
     setSearch('');
@@ -678,6 +709,7 @@ export default function Students() {
         student={editing}
         buses={buses?.buses ?? []}
         routes={routes?.routes ?? []}
+        faculties={facultyOptions}
       />
 
       <ConfirmDialog

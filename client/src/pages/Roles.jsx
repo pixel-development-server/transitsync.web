@@ -5,6 +5,7 @@ import { Badge, DataTable, EmptyState, ErrorState, Modal, PageHeader, Panel, Spi
 import { Checkbox, FormError } from '../components/form.jsx';
 import { api } from '../lib/api.js';
 import { useApi } from '../lib/hooks.js';
+import { useAuth } from '../lib/auth.jsx';
 import { useToast } from '../lib/toast.jsx';
 import { modulePermissionKeys } from '../lib/permissions.js';
 
@@ -156,6 +157,7 @@ function RolePermissionsDialog({ open, onClose, onSaved, role, modules, allPermi
 const EMPTY = [];
 
 export default function Roles() {
+  const { user: currentUser } = useAuth();
   const [editing, setEditing] = useState(null);
   const [search, setSearch] = useState('');
 
@@ -164,7 +166,16 @@ export default function Roles() {
   const modulesList = data?.modules ?? EMPTY;
   const allPermsList = data?.permissions ?? EMPTY;
 
-  const roles = rolesList;
+  // Total-stealth client guard: the Level 200 role definition is never rendered
+  // to a campus principal (`SUPER_ADMIN`-only unless role_level === 200), even
+  // if a stale cache or proxy already delivered it.
+  const roles = useMemo(
+    () =>
+      (rolesList ?? EMPTY).filter(
+        (role) => Number(currentUser?.roleLevel ?? 200) >= 200 || Number(role.level ?? 0) < 200,
+      ),
+    [rolesList, currentUser],
+  );
   const modules = modulesList;
   const allPermissions = allPermsList;
   const needle = search.trim().toLowerCase();

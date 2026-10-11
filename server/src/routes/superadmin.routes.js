@@ -17,12 +17,16 @@ import {
   listColleges,
   provisionCollege,
   setCollegeStatus,
+  updateCollege,
+  deleteCollege,
   platformOverview,
 } from '../services/colleges.js';
 import {
   maintenanceSchema,
   collegeCreateSchema,
   collegeStatusSchema,
+  collegeUpdateSchema,
+  collegeDeleteSchema,
   collegeIdSchema,
 } from '../validation/schemas.js';
 
@@ -106,6 +110,60 @@ router.patch(
       }),
     );
     res.json({ success: true, data: { college } });
+  }),
+);
+
+/** PUT /api/super-admin/colleges/:id — rename / re-slug / re-point a campus. */
+router.put(
+  '/colleges/:id',
+  validate(collegeIdSchema, 'params'),
+  validate(collegeUpdateSchema),
+  asyncHandler(async (req, res) => {
+    const college = updateCollege(getDb(), req.params.id, req.body);
+    recordAudit(
+      fromRequest(req, 'platform.college.update', {
+        entity: 'institution',
+        entityId: college.id,
+        detail: { name: college.name, code: college.code, adminEmail: college.adminEmail },
+      }),
+    );
+    res.json({ success: true, data: { college } });
+  }),
+);
+
+/**
+ * DELETE /api/super-admin/colleges/:id — retire a campus.
+ *
+ * Soft by default: the campus is tombstoned, its staff suspended with all
+ * sessions revoked, and its students withdrawn. `?purge=true` hard-deletes the
+ * campus and its tenant-scoped rows instead. Pass `purge` in the JSON body if
+ * a URL flag is undesirable in your client.
+ */
+router.delete(
+  '/colleges/:id',
+  validate(collegeIdSchema, 'params'),
+  asyncHandler(async (req, res) => {
+    const purge = req.query.purge === 'true' || req.body?.purge === true;
+    const result = deleteCollege(getDb(), req.params.id, { purge });
+
+    recordAudit(
+      fromRequest(req, purge ? 'platform.college.purge' : 'platform.college.delete', {
+        entity: 'institution',
+        entityId: req.params.id,
+        detail: { purge, code: result.code, name: result.name },
+      }),
+    );
+
+    res.json({
+      success: true,
+      data: {
+        message: purge
+          ? `${result.name} was permanently deleted along with its users, students and fleet records.`
+          : `${result.name} was removed. Its account was suspended and its students withdrawn.`,
+        deleted: true,
+        purge,
+      },
+    });
   }),
 );
 

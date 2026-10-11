@@ -16,12 +16,21 @@ const FEATURES = [
 ];
 
 /**
- * Path for the curved "Login" cut-out tab (viewBox 0 0 100 72).
- * The blue panel curves inward into the white form with matching
- * concave fillets (radius 14) at the top and bottom of the tab.
+ * One-slot geometry for the Staff/Student morphing notch (viewBox 0 0 132 40).
+ * The white pill rows flush against the blue/white boundary at x=132; the blue
+ * panel curves into the pill's top-left and bottom-left fillets so the active
+ * tab reads as a cut-out notch, exactly like the old static "Login" tab.
  */
-const TAB_PATH =
-  'M100 0 A14 14 0 0 1 86 14 L34 14 A22 22 0 0 0 12 36 A22 22 0 0 0 34 58 L86 58 A14 14 0 0 1 100 72 Z';
+const NOTCH_W = 132;
+const NOTCH_SLOT = 40;
+const NOTCH_PATH =
+  'M132 0 A10 10 0 0 1 122 10 L22 10 A16 16 0 0 0 8 20 A16 16 0 0 0 22 30 L122 30 A10 10 0 0 1 132 40 Z';
+
+/** The two roles the notch morphs between, top STAFF / bottom STUDENT. */
+const AUDIENCE_OPTIONS = [
+  { key: 'staff', icon: 'user', label: 'STAFF' },
+  { key: 'student', icon: 'graduationCap', label: 'STUDENT' },
+];
 
 /** Deliberately loose, client-side format gate; the server validates authoritatively. */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -375,20 +384,62 @@ export default function Login() {
             </ul>
           </div>
 
-          {/* Curved "Login" cut-out tab: the blue curves inward into the white form. */}
-          <div className="pointer-events-none absolute top-32 right-0 z-30 hidden select-none md:block">
-            <div className="relative h-[72px] w-[100px]">
-              <svg
-                viewBox="0 0 100 72"
-                className="absolute inset-0 h-full w-full"
+          {/* Staff / Student morphing notch: the white curved pill pivots between
+              STAFF (top) and STUDENT (bottom) as the audience changes. Desktop
+              only — the horizontal segment below takes over below `lg`. */}
+          <div className="absolute top-32 right-0 z-30 hidden select-none lg:block">
+            <div className="relative" style={{ width: NOTCH_W, height: NOTCH_SLOT * 2 }}>
+              {/* Sliding white pill */}
+              <div
                 aria-hidden="true"
-                fill="#ffffff"
+                className="absolute inset-x-0"
+                style={{
+                  top: isStudent ? NOTCH_SLOT : 0,
+                  height: NOTCH_SLOT,
+                  transition: 'top 0.35s cubic-bezier(0.4, 0, 0.2, 1)',
+                }}
               >
-                <path d={TAB_PATH} />
-              </svg>
-              <span className="absolute inset-0 flex items-center justify-center pl-3 text-sm font-black tracking-[0.18em] text-slate-900 uppercase">
-                Login
-              </span>
+                <svg
+                  viewBox={`0 0 ${NOTCH_W} ${NOTCH_SLOT}`}
+                  className="h-full w-full"
+                  fill="#ffffff"
+                >
+                  <path d={NOTCH_PATH} />
+                </svg>
+                <span className="absolute inset-0 flex items-center justify-center gap-1.5 text-[0.68rem] font-black tracking-[0.15em] text-slate-900 uppercase">
+                  {AUDIENCE_OPTIONS.map((option) =>
+                    option.key === audience ? (
+                      <span key={option.key} className="flex items-center justify-center gap-1.5">
+                        <Icon name={option.icon} className="h-3.5 w-3.5" strokeWidth={2.2} />
+                        {option.label}
+                      </span>
+                    ) : null,
+                  )}
+                </span>
+              </div>
+
+              {/* Click targets: inactive labels sit on the blue panel, the active
+                  one is hidden under the opaque pill so its own copy never
+                  flashes against it. */}
+              {AUDIENCE_OPTIONS.map((option, index) => {
+                const isActive = audience === option.key;
+                return (
+                  <button
+                    key={option.key}
+                    type="button"
+                    disabled={submitting || checking || isActive}
+                    onClick={() => switchAudience(option.key)}
+                    aria-label={`Sign in as ${option.label.toLowerCase()}`}
+                    className={`absolute inset-x-0 flex items-center justify-center gap-1.5 text-[0.68rem] font-black tracking-[0.15em] uppercase transition ${
+                      isActive ? 'text-transparent' : 'text-white/80 hover:text-white'
+                    }`}
+                    style={{ top: index * NOTCH_SLOT, height: NOTCH_SLOT }}
+                  >
+                    <Icon name={option.icon} className="h-3.5 w-3.5" strokeWidth={2.2} />
+                    {option.label}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </aside>
@@ -397,8 +448,10 @@ export default function Login() {
         <section className="flex h-full flex-col bg-white md:col-span-7">
           <div className="flex flex-1 items-center justify-center px-8 md:px-20">
             <div className="w-full max-w-md">
-              {/* Audience switch: staff console vs. student rider portal. */}
-              <div className="mb-6 flex justify-center">
+              {/* Audience switch: staff console vs. student rider portal. On
+                  larger screens the morphing notch on the brand panel takes
+                  over; this horizontal segment is the small-screen fallback. */}
+              <div className="mb-6 flex justify-center lg:hidden">
                 <div
                   role="tablist"
                   aria-label="Sign-in type"
@@ -437,7 +490,7 @@ export default function Login() {
 
               <h1 className="mt-5 text-center text-3xl font-extrabold tracking-tight text-slate-900">
                 {step === 'email'
-                  ? (isStudent ? 'Student sign in' : 'Login')
+                  ? (isStudent ? 'Student Portal' : 'Staff Sign-In')
                   : step === 'setup'
                     ? (isStudent ? 'Activate your pass' : 'Set your password')
                     : 'Welcome back'}
@@ -519,6 +572,19 @@ export default function Login() {
                 </div>
               ) : null}
 
+              {/* Blue notice banner for the student rider portal. */}
+              {isStudent && step === 'email' ? (
+                <div
+                  role="note"
+                  className="mb-4 flex items-start gap-2.5 rounded-xl border border-blue-200 bg-blue-50 px-3.5 py-2.5 text-[0.8rem] text-blue-800"
+                >
+                  <Icon name="info" className="mt-px h-4 w-4 shrink-0 text-blue-500" />
+                  <p className="min-w-0 flex-1">
+                    Only verified university emails (@iic.edu.np) can access live route schedules.
+                  </p>
+                </div>
+              ) : null}
+
               {/* The step panel is keyed so each transition remounts it and replays
                   the slide animation in the correct direction. */}
               <div key={step} className={step === 'email' ? 'ts-slide-in-left' : `ts-slide-in-${slide}`}>
@@ -526,7 +592,7 @@ export default function Login() {
                   <form onSubmit={onCheckEmail} className="space-y-4" noValidate>
                     <div>
                       <label htmlFor="login-email" className={LABEL_CLASS}>
-                        Email address
+                        {isStudent ? 'Institutional email' : 'Email address'}
                       </label>
                       <input
                         id="login-email"
@@ -534,7 +600,7 @@ export default function Login() {
                         type="email"
                         name="email"
                         autoComplete="username"
-                        placeholder={isStudent ? 'you@student.edu.np' : 'you@transitsync.edu.np'}
+                        placeholder={isStudent ? 'student@iic.edu.np' : 'admin@iic.edu.np'}
                         value={email}
                         onChange={(event) => {
                           setEmail(event.target.value);
@@ -562,7 +628,7 @@ export default function Login() {
                       ) : (
                         <Icon name="arrowRight" className="h-4 w-4" />
                       )}
-                      <span>{checking ? 'Checking…' : 'Continue'}</span>
+                      <span>{checking ? 'Checking…' : isStudent ? 'Continue to Student Portal' : 'Continue to Staff Dashboard'}</span>
                     </button>
                   </form>
                 ) : (
@@ -761,7 +827,7 @@ export default function Login() {
               <p className="mt-3 text-center text-xs text-slate-400">
                 {isStudent
                   ? 'Read-only rider access. Activity is logged for campus transport records.'
-                  : 'Authorised staff only. All access is logged and audited under system policy.'}
+                  : 'Authorized staff only. All access is logged and audited under system policy.'}
               </p>
             </div>
           </div>

@@ -47,9 +47,11 @@ function shape(row) {
   };
 }
 
-/** Every campus, oldest first, with its administrator and headcounts. */
+/** Every live campus, oldest first, with its administrator and headcounts. Tombstoned campuses are hidden. */
 export function listColleges(db = getDb()) {
-  const rows = db.prepare(`${COLLEGE_SELECT} ORDER BY i.created_at ASC, i.name ASC`).all();
+  const rows = db
+    .prepare(`${COLLEGE_SELECT} WHERE i.deleted_at IS NULL ORDER BY i.created_at ASC, i.name ASC`)
+    .all();
   return rows.map(shape);
 }
 
@@ -118,6 +120,107 @@ export function setCollegeStatus(db, id, status) {
   return getCollege(db, id);
 }
 
+/**
+ * Edit a campus: rename it, re-slug its code, or re-point the administrative
+ * email shown in the master panel. Because the "administration email" is the
+ * primary System Administrator's login, changing it rewrites that user's email
+ * (with the usual uniqueness check) inside the same transaction.
+ */
+export function updateCollege(db, id, { name, code, adminEmail } = {}) {
+  const existing = db.prepare('SELECT * FROM institutions WHERE id = ?').get(id);
+  if (!existing) throw notFound('College');
+
+  // Uniqueness against the live set, only when the value actually changes.
+  if (code && code !== existing.code) {
+    if (db.prepare('SELECT id FROM institutions WHERE code = ? AND id <> ?').get(code, id)) {
+      throw conflict(`A college with the code "${code}" already exists.`);
+    }
+  }
+
+  let adminId = null;
+  if (adminEmail) {
+    const admin = db
+      .prepare(
+        `SELECT u.id, u.email FROM users u JOIN roles r ON r.id = u.role_id
+          WHERE u.tenant_id = ? AND r.key = ? ORDER BY u.id LIMIT 1`,
+      )
+      .get(id, ROLE_KEYS.SYSTEM_ADMIN);
+    if (admin && admin.email.toLowerCase() !== adminEmail.toLowerCase()) {
+      if (db.prepare('SELECT id FROM users WHERE email = ? AND id <> ?').get(adminEmail, admin.id)) {
+        throw conflict('A user with that administrator email already exists.');
+      }
+      adminId = admin.id;
+    }
+  }
+
+  db.transaction(() => {
+    if (name || code) {
+      db.prepare(
+        `UPDATE institutions
+            SET name = COALESCE(NULLIF(?, ''), name),
+                code = COALESCE(NULLIF(?, ''), code),
+                updated_at = datetime('now')
+          WHERE id = ?`,
+      ).run(name ?? null, code ?? null, id);
+    }
+    if (adminId) {
+      db.prepare("UPDATE users SET email = ?, updated_at = datetime('now') WHERE id = ?").run(adminEmail, adminId);
+    }
+  });
+
+  return getCollege(db, id);
+}
+
+/**
+ * Remove a campus.
+ *
+ * The default is a tombstone that keeps every row attributable:
+ *   - the college gains `deleted_at` and disappears from every list,
+ *   - its staff are suspended with `token_version` bumped (killing any live
+ *     JWT) and every session revoked,
+ *   - its students are moved to WITHDRAWN.
+ * Fleet assets and scan history are retained for audit.
+ *
+ * `purge: true` hard-deletes the institution and its tenant-scoped rows
+ * (users, students, buses, routes) instead; operational alert/scan rows are
+ * unlinked (`tenant_id` → NULL) rather than destroyed.
+ */
+export function deleteCollege(db, id, { purge = false } = {}) {
+  const existing = db.prepare('SELECT * FROM institutions WHERE id = ?').get(id);
+  if (!existing) throw notFound('College');
+
+  if (purge) {
+    db.transaction(() => {
+      db.prepare('DELETE FROM students WHERE tenant_id = ?').run(id);
+      db.prepare('DELETE FROM buses WHERE tenant_id = ?').run(id);
+      db.prepare('DELETE FROM routes WHERE tenant_id = ?').run(id);
+      db.prepare('DELETE FROM users WHERE tenant_id = ?').run(id);
+      db.prepare('UPDATE alerts      SET tenant_id = NULL WHERE tenant_id = ?').run(id);
+      db.prepare('UPDATE scan_events SET tenant_id = NULL WHERE tenant_id = ?').run(id);
+      db.prepare('DELETE FROM institutions WHERE id = ?').run(id);
+    });
+    return { id, name: existing.name, code: existing.code, deleted: true, purge: true };
+  }
+
+  db.transaction(() => {
+    db.prepare(
+      "UPDATE institutions SET status = 'SUSPENDED', deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+    ).run(id);
+    db.prepare(
+      "UPDATE users SET status = 'suspended', token_version = token_version + 1, updated_at = datetime('now') WHERE tenant_id = ?",
+    ).run(id);
+    db.prepare(
+      `UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = 'tenant_deleted'
+        WHERE user_id IN (SELECT id FROM users WHERE tenant_id = ?) AND revoked_at IS NULL`,
+    ).run(id);
+    db.prepare(
+      "UPDATE students SET status = 'WITHDRAWN', updated_at = datetime('now') WHERE tenant_id = ? AND status = 'ACTIVE'",
+    ).run(id);
+  });
+
+  return { ...getCollege(db, id), deleted: true };
+}
+
 /** Aggregate figures for the System Health panel. */
 export function platformOverview(db = getDb()) {
   const count = (sql, ...params) => db.prepare(sql).get(...params).n;
@@ -147,4 +250,4 @@ export function platformOverview(db = getDb()) {
   };
 }
 
-export default { listColleges, getCollege, provisionCollege, setCollegeStatus, platformOverview };
+export default { listColleges, getCollege, provisionCollege, setCollegeStatus, updateCollege, deleteCollege, platformOverview };

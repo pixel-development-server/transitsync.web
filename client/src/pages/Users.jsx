@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { Icon } from '../components/Icon.jsx';
 import {
@@ -22,7 +22,6 @@ import {
   Input,
   SegmentedControl,
   Select,
-  Toggle,
 } from '../components/form.jsx';
 import { api } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
@@ -212,17 +211,24 @@ function PermissionsDialog({ open, onClose, onSaved, user, roles, permissionMatr
   );
 }
 
-function UserDialog({ open, onClose, onSaved, onCreated, user, roles }) {
+function UserDialog({ open, onClose, onSaved, onCreated, user, roles, currentUser }) {
   const toast = useToast();
   const [form, setForm] = useState(EMPTY_USER);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [showPassword, setShowPassword] = useState(false);
+
+  // Seniority rule on the client too: an actor can only hand out roles that
+  // sit strictly below their own level — including at Level 200, which must
+  // never mint a peer Super Administrator (the server rejects it regardless).
+  const assignableRoles = useMemo(() => {
+    const list = roles?.roles ?? [];
+    const level = Number(currentUser?.roleLevel ?? 200);
+    return list.filter((role) => Number(role.level) < level);
+  }, [roles, currentUser]);
 
   useEffect(() => {
     if (!open) return;
     setError(null);
-    setShowPassword(false);
     setForm(
       user
         ? {
@@ -234,9 +240,9 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles }) {
             department: user.department ?? '',
             phone: user.phone ?? '',
           }
-        : { ...EMPTY_USER, roleId: String(roles?.roles?.[0]?.id ?? '') },
+        : { ...EMPTY_USER, roleId: String(assignableRoles[0]?.id ?? '') },
     );
-  }, [open, user, roles]);
+  }, [open, user, roles, assignableRoles]);
 
   const set = useCallback(
     (key) => (event) => {
@@ -251,6 +257,27 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles }) {
   const submit = async (event) => {
     event.preventDefault();
     setError(null);
+
+    const email = form.email.trim().toLowerCase();
+    // Client-side gate for the two hard requirements before anything touches
+    // the network. The server validates authoritatively on top of this.
+    if (!email.includes('@')) {
+      setError({
+        message: 'Check the highlighted fields.',
+        fieldErrors: {
+          email: "Please enter a valid email address containing '@' (e.g., admin@iic.edu.np).",
+        },
+      });
+      return;
+    }
+    if (!user && !form.temporaryPassword.trim()) {
+      setError({
+        message: 'Check the highlighted fields.',
+        fieldErrors: { temporaryPassword: 'A temporary password is required.' },
+      });
+      return;
+    }
+
     setSaving(true);
     try {
       if (user) {
@@ -263,7 +290,6 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles }) {
         });
         toast.success(`${form.fullName} updated.`);
       } else {
-        const email = form.email.trim().toLowerCase();
         const response = await api.post('/users', {
           email,
           fullName: form.fullName.trim(),
@@ -299,7 +325,7 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles }) {
       open={open}
       onClose={onClose}
       title={user ? `Edit ${user.fullName}` : 'Create a staff account'}
-      subtitle={user ? user.email : 'Set a temporary password, or invite them to choose their own at first sign-in.'}
+      subtitle={user ? user.email : 'Name the account, pick a role and set a temporary password to hand over.'}
       footer={
         <>
           <button type="button" className="btn btn-ghost" onClick={onClose} disabled={saving}>
@@ -338,7 +364,7 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles }) {
             value={form.roleId}
             onChange={set('roleId')}
             error={fieldErrors.roleId}
-            options={(roles?.roles ?? []).map((role) => ({
+            options={assignableRoles.map((role) => ({
               value: role.id,
               label: `${role.name} (level ${role.level})`,
             }))}
@@ -352,24 +378,20 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles }) {
 
         {!user ? (
           <div className="rounded-xl bg-[var(--surface-sunken)] p-3.5">
-            <Toggle
-              checked={showPassword}
-              onChange={setShowPassword}
-              label="Set a temporary password"
-              hint="Leave off and the staff member chooses their own password at first sign-in."
-            />
-            {showPassword ? (
-              <div className="mt-3">
-                <Input
-                  label="Temporary password"
-                  value={form.temporaryPassword}
-                  onChange={set('temporaryPassword')}
-                  error={fieldErrors.temporaryPassword}
-                  placeholder="Any value — the holder sets their own at first sign-in"
-                  disabled={saving}
-                />
-              </div>
-            ) : null}
+            <Input
+              label="Temporary password"
+              value={form.temporaryPassword}
+              onChange={set('temporaryPassword')}
+              error={fieldErrors.temporaryPassword}
+              placeholder="Share this once — the holder rotates it at first sign-in"
+              required
+              disabled={saving}
+            >
+              <p className="mt-1.5 text-[0.72rem] leading-relaxed text-mist-500">
+                Single-use handover credential. The complexity policy does not apply to it — the
+                holder is forced to set their own password at first sign-in.
+              </p>
+            </Input>
           </div>
         ) : null}
       </form>
@@ -468,7 +490,12 @@ export default function Users() {
     enabled: can('users:assign_permissions'),
   });
 
-  const users = data?.users ?? EMPTY;
+  // Total-stealth client guard: Level 200 rows must never render for a campus
+  // principal, even if a stale cache or proxy already delivered them. The API
+  // already refuses to send them; this keeps the render honest regardless.
+  const users = (data?.users ?? EMPTY).filter(
+    (row) => Number(currentUser?.roleLevel ?? 200) >= 200 || Number(row.roleLevel ?? 0) < 200,
+  );
   const meta = data?.meta;
 
   const clearFilters = () => {
@@ -749,6 +776,7 @@ export default function Users() {
         onCreated={handleCreated}
         user={editing}
         roles={roles}
+        currentUser={currentUser}
       />
 
       <CredentialDialog credential={issued} onClose={() => setIssued(null)} />

@@ -15,7 +15,7 @@ import {
   permissionMatrix,
   requiresPasswordChange,
 } from '../services/permissions.js';
-import { MODULES, ALL_PERMISSIONS, isValidPermission, ROLE_KEYS } from '../db/permissions.js';
+import { MODULES, ALL_PERMISSIONS, isValidPermission, ROLE_KEYS, SUPER_ADMIN_LEVEL } from '../db/permissions.js';
 import {
   createUserSchema,
   updateUserSchema,
@@ -69,6 +69,28 @@ function assertAssignableRole(actor, role, action = 'assign') {
   }
 }
 
+/**
+ * Total-stealth guard for the Level 200 Super Administrator.
+ *
+ * Below level 200 the account, its role definition and its headcount are not
+ * merely protected — they do not exist. Every route that resolves a target by
+ * id calls this so a campus-level principal hitting `/users/:id` for a Level
+ * 200 account gets `404 Not Found` instead of `403`, which would confirm the
+ * account's existence. Above 200 the guard is a no-op.
+ */
+function assertPrincipalCanSee(actor, target) {
+  if (Number(actor.role_level) < SUPER_ADMIN_LEVEL && Number(target.role_level) >= SUPER_ADMIN_LEVEL) {
+    throw notFound('Staff member');
+  }
+}
+
+/** Level 200 roles only exist for a Level 200 principal. */
+function visibleRoles(db, actorLevel) {
+  const roles = permissionMatrix(db);
+  if (Number(actorLevel) >= SUPER_ADMIN_LEVEL) return roles;
+  return roles.filter((role) => Number(role.level) < SUPER_ADMIN_LEVEL);
+}
+
 // ---------------------------------------------------------------------------
 // List staff
 // ---------------------------------------------------------------------------
@@ -95,6 +117,13 @@ router.get(
     if (status && status !== 'all') {
       clauses.push('u.status = ?');
       params.push(status);
+    }
+    // Total-stealth: anyone below Level 200 never even sees that Level 200
+    // accounts exist. Applied to both the page query and the total count so the
+    // numbers agree.
+    if (Number(req.user.role_level) < SUPER_ADMIN_LEVEL) {
+      clauses.push('r.level < ?');
+      params.push(SUPER_ADMIN_LEVEL);
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
@@ -169,7 +198,7 @@ router.get(
       data: {
         modules: MODULES,
         permissions: ALL_PERMISSIONS,
-        roles: permissionMatrix(db),
+        roles: visibleRoles(db, req.user.role_level),
       },
     });
   }),
@@ -208,6 +237,7 @@ router.get(
     const db = getDb();
     const user = loadUserForAuth(db, Number(req.params.id));
     if (!user) throw notFound('Staff member');
+    assertPrincipalCanSee(req.user, user);
 
     const overrides = db
       .prepare(
@@ -249,7 +279,7 @@ router.post(
     const db = getDb();
     const {
       email, fullName, roleId, jobTitle, department, phone,
-      temporaryPassword, permissionsMode, permissions, forcePasswordChange,
+      temporaryPassword, permissionsMode, permissions, forcePasswordChange, tenantId,
     } = req.body;
 
     if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) {
@@ -285,13 +315,22 @@ router.post(
     const passwordChanged = issuedPassword ? (forcePasswordChange ? 0 : 1) : 0;
     const forceReset = issuedPassword ? (forcePasswordChange ? 1 : 0) : 0;
 
+    // Campus principals always place accounts in their own campus. A platform
+    // principal may pass an explicit tenant, defaulting to platform-global.
+    if (tenantId && !db.prepare('SELECT id FROM institutions WHERE id = ?').get(tenantId)) {
+      throw unprocessable('Unknown college tenant.', [
+        { field: 'tenantId', message: 'Pick a valid campus tenant.' },
+      ]);
+    }
+    const tenant = tenantId ?? req.user.tenant_id ?? null;
+
     const userId = db.transaction(() => {
       const result = db
         .prepare(
 `INSERT INTO users
            (email, full_name, password_hash, phone, job_title, department, role_id,
-            status, is_first_login, password_changed, force_password_reset, permissions_mode, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            status, is_first_login, password_changed, force_password_reset, permissions_mode, tenant_id, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
         .run(
           email, fullName, passwordHash, phone ?? null, jobTitle ?? null, department ?? null,
@@ -301,6 +340,7 @@ router.post(
           passwordChanged,
           forceReset,
           permissionsMode,
+          tenant,
           req.user.id,
         );
 
@@ -348,6 +388,7 @@ router.patch(
     const id = Number(req.params.id);
     const target = loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
+    assertPrincipalCanSee(req.user, target);
 
     const { fullName, roleId, status, jobTitle, department, phone } = req.body;
     const isSelf = id === Number(req.user.id);
@@ -426,6 +467,7 @@ router.put(
     const id = Number(req.params.id);
     const target = loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
+    assertPrincipalCanSee(req.user, target);
     assertRankAbove(req.user, target, 'change permissions for');
 
     const { permissionsMode, permissions } = req.body;
@@ -479,6 +521,7 @@ router.delete(
     const id = Number(req.params.id);
     const target = loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
+    assertPrincipalCanSee(req.user, target);
     assertRankAbove(req.user, target, 'reset permissions for');
 
     db.transaction(() => {
@@ -504,6 +547,7 @@ router.post(
     const id = Number(req.params.id);
     const target = loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
+    assertPrincipalCanSee(req.user, target);
     assertRankAbove(req.user, target, 'force a password reset for');
     if (id === Number(req.user.id)) throw badRequest('You cannot force a password reset on your own account.');
 
@@ -525,6 +569,7 @@ router.post(
     const id = Number(req.params.id);
     const target = loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
+    assertPrincipalCanSee(req.user, target);
     assertRankAbove(req.user, target, 'reset the password for');
 
     const plain = generateTemporaryPassword();
@@ -561,6 +606,7 @@ router.delete(
 
     const target = loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
+    assertPrincipalCanSee(req.user, target);
 
     if (target.role_key === ROLE_KEYS.SYSTEM_ADMIN) {
       const remaining = db
@@ -611,6 +657,7 @@ router.delete(
 
     const target = loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
+    assertPrincipalCanSee(req.user, target);
 
     if (target.role_key === ROLE_KEYS.SYSTEM_ADMIN) {
       const remaining = db
@@ -644,7 +691,7 @@ rolesRouter.get(
   requirePermission('roles:read'),
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const roles = permissionMatrix(db).map((role) => {
+    const roles = visibleRoles(db, req.user.role_level).map((role) => {
       const headcount = db
         .prepare('SELECT COUNT(*) AS n FROM users WHERE role_id = ? AND status = ?')
         .get(role.id, 'active').n;

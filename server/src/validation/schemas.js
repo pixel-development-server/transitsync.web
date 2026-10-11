@@ -15,6 +15,14 @@ const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Expected a #RRGGBB colou
 const emptyToNull = (schema) =>
   z.preprocess((value) => (value === '' || value === undefined ? null : value), schema.nullable());
 
+/**
+ * Inline email hint used on the student portal and the college provisioning
+ * forms. Distinct from the generic staff message so a student knows campus
+ * email shapes (`student@campus.edu.np`) are the expected format.
+ */
+const invalidEmailMessage =
+  "Please enter a valid email address containing '@' (e.g., student@iic.edu.np)";
+
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
@@ -48,12 +56,12 @@ export const setFirstPasswordSchema = z
  * student choose their own password, which is what claims the account.
  */
 export const studentCheckEmailSchema = z.object({
-  email: z.string().trim().toLowerCase().email('Enter a valid email address'),
+  email: z.string().trim().toLowerCase().email(invalidEmailMessage),
 });
 
 export const studentRegisterSchema = z
   .object({
-    email: z.string().trim().toLowerCase().email('Enter a valid email address'),
+    email: z.string().trim().toLowerCase().email(invalidEmailMessage),
     password: z.string().min(1, 'Password is required'),
     confirmPassword: z.string(),
   })
@@ -111,6 +119,10 @@ export const createUserSchema = z.object({
   permissionsMode: z.enum(['INHERIT', 'CUSTOM']).optional().default('INHERIT'),
   permissions: z.array(z.string()).optional().default([]),
   forcePasswordChange: z.boolean().optional().default(true),
+  // Tenant the new account belongs to. Omitted for campus principals, who are
+  // constrained to their own campus; a platform principal may place an account
+  // anywhere (or leave it platform-global by omitting this).
+  tenantId: z.string().trim().uuid('Unknown college tenant.').nullable().optional(),
 });
 
 export const updateUserSchema = z.object({
@@ -146,7 +158,7 @@ export const rolePermissionsSchema = z.object({
 const studentBody = {
   fullName: trimmed(2, 120),
   collegeId: trimmed(3, 40).regex(/^[A-Za-z0-9\-_/]+$/, 'Only letters, digits, dashes, slashes and underscores'),
-  email: emptyToNull(z.string().trim().toLowerCase().email('Enter a valid email address')).optional(),
+  email: emptyToNull(z.string().trim().toLowerCase().email(invalidEmailMessage)).optional(),
   phone: optionalText(40),
   faculty: optionalText(120),
   program: optionalText(120),
@@ -397,6 +409,21 @@ export const collegeStatusSchema = z.object({
   status: z.enum(['ACTIVE', 'SUSPENDED']),
 });
 
+/** At least one field must change — blank edits are refused before SQL. */
+export const collegeUpdateSchema = z
+  .object({
+    name: trimmed(2, 160).optional(),
+    code: collegeCode.optional(),
+    adminEmail: z.string().trim().toLowerCase().email(invalidEmailMessage).max(200).optional(),
+  })
+  .refine((data) => data.name || data.code || data.adminEmail, {
+    message: 'Provide at least one field to update.',
+  });
+
+export const collegeDeleteSchema = z.object({
+  purge: z.enum(['true', 'false']).optional().default('false'),
+});
+
 export const collegeIdSchema = z.object({ id: z.string().trim().uuid('Unknown college id.') });
 
 // ---------------------------------------------------------------------------
@@ -443,6 +470,8 @@ export const schemas = {
   maintenanceSchema,
   collegeCreateSchema,
   collegeStatusSchema,
+  collegeUpdateSchema,
+  collegeDeleteSchema,
   collegeIdSchema,
   idSchema,
   sessionIdSchema,

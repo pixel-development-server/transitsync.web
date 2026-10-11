@@ -8,7 +8,7 @@
  * `requireSuperAdmin`, so this page is the matching affordance, not the control.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { Icon } from '../../components/Icon.jsx';
 import {
@@ -182,6 +182,200 @@ function CredentialsModal({ result, onClose }) {
   );
 }
 
+function EditCollegeModal({ college, onClose, onSaved }) {
+  const toast = useToast();
+  const [form, setForm] = useState(BLANK);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!college) return;
+    setError(null);
+    setForm({
+      name: college.name ?? '',
+      code: college.code ?? '',
+      adminEmail: college.adminEmail ?? '',
+    });
+  }, [college]);
+
+  const set = (key) => (event) => setForm((current) => ({ ...current, [key]: event.target.value }));
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await api.put(`/super-admin/colleges/${college.id}`, {
+        name: form.name.trim(),
+        code: form.code.trim().toLowerCase(),
+        adminEmail: form.adminEmail.trim().toLowerCase(),
+      });
+      toast.success(`${form.name.trim()} updated.`);
+      onSaved?.();
+      onClose?.();
+    } catch (caught) {
+      setError(caught);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={Boolean(college)}
+      onClose={onClose}
+      title="Edit college"
+      subtitle={college ? `Rename, re-slug or re-point the administrator for ${college.name}.` : ''}
+      footer={
+        <>
+          <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button type="submit" form="edit-college" className="btn btn-primary" disabled={busy}>
+            {busy ? <Spinner className="h-3.5 w-3.5" /> : <Icon name="check" className="h-3.5 w-3.5" />}
+            Save changes
+          </button>
+        </>
+      }
+    >
+      <form id="edit-college" className="space-y-3.5" onSubmit={submit}>
+        <FormError error={error} onDismiss={() => setError(null)} />
+        <Input
+          label="College name"
+          required
+          value={form.name}
+          onChange={set('name')}
+          error={error?.fieldErrors?.name}
+          disabled={busy}
+        />
+        <Input
+          label="College code (slug)"
+          required
+          value={form.code}
+          onChange={set('code')}
+          hint="Lowercase letters, digits and hyphens. Used as the tenant key."
+          error={error?.fieldErrors?.code}
+          disabled={busy}
+        />
+        <Input
+          label="Administrator email"
+          type="email"
+          required
+          value={form.adminEmail}
+          onChange={set('adminEmail')}
+          error={error?.fieldErrors?.adminEmail}
+          disabled={busy}
+        />
+      </form>
+    </Modal>
+  );
+}
+
+function DeleteCollegeModal({ college, onClose, onDeleted }) {
+  const toast = useToast();
+  const [confirm, setConfirm] = useState('');
+  const [purge, setPurge] = useState(false);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!college) return;
+    setError(null);
+    setConfirm('');
+    setPurge(false);
+  }, [college]);
+
+  const matches = confirm.trim() === (college?.code ?? '');
+
+  const confirmDelete = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.del(`/super-admin/colleges/${college.id}`, purge ? { body: { purge: true } } : undefined);
+      toast.success(purge ? `${college.name} permanently deleted.` : `${college.name} removed.`);
+      onDeleted?.();
+      onClose?.();
+    } catch (caught) {
+      setError(caught);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={Boolean(college)}
+      onClose={onClose}
+      size="sm"
+      title={`Delete ${college?.name ?? 'college'}?`}
+      footer={
+        <>
+          <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn btn-danger"
+            disabled={!matches || busy}
+            onClick={confirmDelete}
+          >
+            {busy ? <Spinner className="h-3.5 w-3.5" /> : <Icon name="trash" className="h-3.5 w-3.5" />}
+            {purge ? 'Purge permanently' : 'Delete college'}
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-3.5">
+        <div className="rounded-xl border border-red-500/35 bg-red-500/10 px-3.5 py-2.5 text-[0.78rem] leading-relaxed text-red-300">
+          <Icon name="alert" className="mr-1.5 inline h-3.5 w-3.5" />
+          {purge ? (
+            <>
+              This permanently destroys the campus, its staff accounts, students, buses and routes.
+              Scan and alert history is detached but retained. This cannot be undone.
+            </>
+          ) : (
+            <>
+              This removes the campus from the platform, suspends its administrator and staff,
+              revokes every session and withdraws its students. Fleet and scan history is retained.
+            </>
+          )}
+        </div>
+
+        <label className="block">
+          <span className="label">
+            Type the college code <span className="font-mono text-red-400">{college?.code}</span> to confirm
+          </span>
+          <input
+            type="text"
+            value={confirm}
+            onChange={(event) => setConfirm(event.target.value)}
+            disabled={busy}
+            placeholder={college?.code}
+            autoComplete="off"
+            spellCheck="false"
+            className="field"
+          />
+        </label>
+
+        <label className="flex cursor-pointer items-start gap-2.5">
+          <input
+            type="checkbox"
+            checked={purge}
+            onChange={(event) => setPurge(event.target.checked)}
+            disabled={busy}
+            className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer rounded border-[var(--border-subtle)] bg-[var(--surface-sunken)] accent-red-500"
+          />
+          <span className="text-[0.8rem] font-medium text-mist-200">
+            Also purge students and fleet records permanently
+          </span>
+        </label>
+
+        <FormError error={error} onDismiss={() => setError(null)} />
+      </div>
+    </Modal>
+  );
+}
+
 export default function Colleges() {
   const toast = useToast();
   const { data, error, loading, reload } = useApi('/super-admin/colleges');
@@ -189,6 +383,8 @@ export default function Colleges() {
 
   const [registerOpen, setRegisterOpen] = useState(false);
   const [createdResult, setCreatedResult] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const [deleting, setDeleting] = useState(null);
   const [pending, setPending] = useState(null);
   const [busy, setBusy] = useState(false);
 
@@ -266,13 +462,33 @@ export default function Colleges() {
       label: '',
       align: 'right',
       render: (row) => (
-        <button
-          type="button"
-          className={`btn btn-ghost !py-1 text-[0.72rem] ${row.status === 'ACTIVE' ? '!text-amber-400' : '!text-emerald-400'}`}
-          onClick={() => setPending(row)}
-        >
-          {row.status === 'ACTIVE' ? 'Suspend' : 'Restore'}
-        </button>
+        <div className="flex items-center justify-end gap-1">
+          <button
+            type="button"
+            className="btn btn-ghost !p-1.5"
+            onClick={() => setEditing(row)}
+            aria-label={`Edit college ${row.name}`}
+            title="Edit college"
+          >
+            <Icon name="edit" className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost !p-1.5 !text-red-300 hover:!text-red-200"
+            onClick={() => setDeleting(row)}
+            aria-label={`Delete college ${row.name}`}
+            title="Delete college"
+          >
+            <Icon name="trash" className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            className={`btn btn-ghost !py-1 text-[0.72rem] ${row.status === 'ACTIVE' ? '!text-amber-400' : '!text-emerald-400'}`}
+            onClick={() => setPending(row)}
+          >
+            {row.status === 'ACTIVE' ? 'Suspend' : 'Restore'}
+          </button>
+        </div>
       ),
     },
   ];
@@ -328,6 +544,17 @@ export default function Colleges() {
         }}
       />
       <CredentialsModal result={createdResult} onClose={() => setCreatedResult(null)} />
+
+      <EditCollegeModal
+        college={editing}
+        onClose={() => setEditing(null)}
+        onSaved={() => reload({ silent: true })}
+      />
+      <DeleteCollegeModal
+        college={deleting}
+        onClose={() => setDeleting(null)}
+        onDeleted={() => reload({ silent: true })}
+      />
 
       <Modal
         open={Boolean(pending)}
