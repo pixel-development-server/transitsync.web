@@ -122,6 +122,13 @@ export default function Login() {
   const institutionName = setup?.institutionName || 'Itahari International College';
   const minLength = setup?.passwordPolicy?.minLength ?? 10;
 
+  // Public status endpoint (no session required). Polled once on mount; the
+  // banner is a courtesy — the server is the authority that actually refuses
+  // campus sign-ins while maintenance mode is on.
+  const { data: systemStatus } = useApi('/system/status');
+  const maintenanceMode = Boolean(systemStatus?.isMaintenanceMode);
+  const maintenanceMessage = systemStatus?.message || 'Server is currently under maintenance';
+
   useEffect(() => {
     document.title = `Sign in · ${institutionName}`;
   }, [institutionName]);
@@ -265,6 +272,17 @@ export default function Login() {
 
   return (
     <div className="login-light flex h-screen min-h-screen w-screen flex-col overflow-hidden bg-white">
+      {/* Global maintenance badge — pinned top-right, above the split layout. */}
+      {maintenanceMode ? (
+        <div
+          role="status"
+          className="fixed top-4 right-4 z-50 flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2 text-[0.8rem] font-bold text-amber-800 shadow-lg shadow-amber-500/10"
+        >
+          <Icon name="alert" className="h-4 w-4 shrink-0 text-amber-500" />
+          <span>⚠️ Server under maintenance</span>
+        </div>
+      ) : null}
+
       {/* -
        * Edge-to-edge split: 5/12 brand panel · 7/12 form panel.
        * */}
@@ -366,6 +384,19 @@ export default function Login() {
                     ? 'First time here? Create the password you will use from now on.'
                     : `Enter your password to continue to ${institutionName}.`}
               </p>
+
+              {maintenanceMode ? (
+                <div
+                  role="alert"
+                  className="mb-4 flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-[0.8rem] text-amber-800"
+                >
+                  <Icon name="alert" className="mt-px h-4 w-4 shrink-0 text-amber-500" />
+                  <p className="min-w-0 flex-1">
+                    <span className="font-semibold">Maintenance in progress.</span> {maintenanceMessage}{' '}
+                    Only the Platform Super Administrator can sign in right now.
+                  </p>
+                </div>
+              ) : null}
 
               {timedOut ? (
                 <div

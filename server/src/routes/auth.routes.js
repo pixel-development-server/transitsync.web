@@ -6,12 +6,13 @@ import { getDb } from '../db/connection.js';
 import { asyncHandler, validate } from '../lib/http.js';
 import { hashPassword, verifyPassword, checkPasswordPolicy, isPasswordSet } from '../lib/password.js';
 import { issueAccessToken, newSessionId, tokenExpiry } from '../lib/tokens.js';
-import AppError, { unauthorized, badRequest, conflict, accountLocked, unprocessable } from '../lib/errors.js';
+import AppError, { unauthorized, badRequest, conflict, accountLocked, unprocessable, maintenanceMode } from '../lib/errors.js';
 import { parseSqliteDate, parseDurationMs } from '../lib/time.js';
 import { requireAuth } from '../middleware/auth.js';
 import { loadUserForAuth, requiresPasswordChange } from '../services/permissions.js';
 import { recordAudit, clientIp } from '../services/audit.js';
-import { ROLE_KEYS } from '../db/permissions.js';
+import { getMaintenance } from '../services/maintenance.js';
+import { ROLE_KEYS, SUPER_ADMIN_LEVEL } from '../db/permissions.js';
 import {
   loginSchema,
   checkEmailSchema,
@@ -289,6 +290,21 @@ router.post(
     };
 
     if (!row) fail('Incorrect email or password.');
+
+    // Global maintenance mode refuses every campus sign-in (role level 1–100).
+    // The Level 200 Super Administrator is the single bypass, so it can get in
+    // to disengage the mode. Checked before the password so a locked platform
+    // leaks nothing about credential validity.
+    const maintenance = getMaintenance(db);
+    if (maintenance.isMaintenanceMode) {
+      const level = row.role_id
+        ? db.prepare('SELECT level FROM roles WHERE id = ?').get(row.role_id)?.level ?? 0
+        : 0;
+      if (level < SUPER_ADMIN_LEVEL) {
+        recordAudit({ userId: row.id, actorEmail: email, action: 'auth.login', ip, status: 'maintenance' });
+        throw maintenanceMode(maintenance.message);
+      }
+    }
 
     const lockedUntil = parseSqliteDate(row.locked_until);
     if (lockedUntil && lockedUntil.getTime() > Date.now()) {

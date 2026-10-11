@@ -97,6 +97,17 @@ export const config = {
   },
 
   /**
+   * Level 200 Platform Super Administrator. Created once on boot only when BOTH
+   * the email and password are set, then forced to rotate on first sign-in. Left
+   * unset by default so no well-known platform credential is ever shipped.
+   */
+  superAdmin: {
+    email: (process.env.SUPER_ADMIN_EMAIL || '').trim().toLowerCase() || null,
+    password: process.env.SUPER_ADMIN_PASSWORD || null,
+    name: process.env.SUPER_ADMIN_NAME || 'Platform Super Administrator',
+  },
+
+  /**
    * Hardware ingest. The Wokwi serial -> HTTP relay has no user session, so it
    * authenticates with a shared token rather than JWT. When unset, the
    * `/api/scans/sync` endpoint only accepts loopback traffic in development.

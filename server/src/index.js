@@ -3,6 +3,7 @@ import os from 'node:os';
 import config from './config/env.js';
 import { getDb, closeDb } from './db/connection.js';
 import { runMigrations } from './db/migrate.js';
+import { ensureSuperAdmin } from './db/seed.js';
 import { ROLE_KEYS } from './db/permissions.js';
 import { createApp } from './app.js';
 import { hub } from './services/realtime.js';
@@ -33,6 +34,15 @@ function bootstrap() {
   });
   const applied = results.filter((entry) => entry.applied).length;
   if (applied) process.stdout.write(`  ${applied} migration(s) applied.\n`);
+
+  // Level 200 platform owner — only materialised when SUPER_ADMIN_EMAIL and
+  // SUPER_ADMIN_PASSWORD are configured. Idempotent.
+  const superAdmin = ensureSuperAdmin(db);
+  if (superAdmin?.created) {
+    process.stdout.write(
+      `  Platform Super Administrator created: ${superAdmin.email} (forced change on first sign-in).\n`,
+    );
+  }
 
   const admin = db
     .prepare(

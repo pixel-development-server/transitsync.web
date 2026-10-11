@@ -4,6 +4,7 @@ import { verifyAccessToken } from '../lib/tokens.js';
 import { unauthorized, forbidden, passwordChangeRequired, serviceLocked } from '../lib/errors.js';
 import { isExpired } from '../lib/time.js';
 import { loadUserForAuth, requiresPasswordChange } from '../services/permissions.js';
+import { SUPER_ADMIN_LEVEL } from '../db/permissions.js';
 
 /**
  * Pull the bearer token from the request.
@@ -110,6 +111,20 @@ export function requireSystemAdmin(req, res, next) {
 }
 
 /**
+ * Platform-owner gate: only a Level 200 Super Administrator may pass. Used by
+ * college provisioning and the global maintenance switch.
+ */
+export function requireSuperAdmin(req, res, next) {
+  if (!req.user) return next(unauthorized());
+  if (Number(req.user.role_level) >= SUPER_ADMIN_LEVEL) return next();
+  return next(
+    forbidden('This platform facility is reserved for the Super Administrator.', {
+      code: 'SUPER_ADMIN_ONLY',
+    }),
+  );
+}
+
+/**
  * The Global Emergency Lockout switch (settings key `system.lockdown`).
  * While engaged, every non-System-Administrator session is frozen.
  */
@@ -130,6 +145,7 @@ export default {
   requireAuth,
   requirePasswordRotated,
   requireSystemAdmin,
+  requireSuperAdmin,
   isLockedOut,
   extractToken,
 };

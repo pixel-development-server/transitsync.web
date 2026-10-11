@@ -13,6 +13,8 @@ import scanRoutes from './scans.routes.js';
 import streamRoutes from './stream.routes.js';
 import settingsRoutes from './settings.routes.js';
 import adminRoutes from './admin.routes.js';
+import systemRoutes from './system.routes.js';
+import superAdminRoutes from './superadmin.routes.js';
 import { getDb } from '../db/connection.js';
 import { hub } from '../services/realtime.js';
 
@@ -52,6 +54,11 @@ router.use('/auth', authRoutes);
 // guard (see scans.routes.js) instead of the JWT/RBAC chain.
 router.use('/scans', scanRoutes);
 
+// Public system status (maintenance flag) — must be readable with no session so
+// the sign-in screen can show the maintenance banner. Only GET /status is
+// defined here; any other /system request falls through to the gated router.
+router.use('/system', systemRoutes);
+
 // ---------------------------------------------------------------------------
 // Everything else requires a valid session, then a rotated password.
 //
@@ -79,5 +86,7 @@ router.use('/settings', settingsRoutes);
 router.use('/system', settingsRoutes);
 // System Control — exclusive to the Level 100 System Administrator.
 router.use('/admin', adminRoutes);
+// Platform Master — exclusive to the Level 200 Super Administrator.
+router.use('/super-admin', superAdminRoutes);
 
 export default router;

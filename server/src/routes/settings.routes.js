@@ -7,6 +7,7 @@ import { badRequest, notFound } from '../lib/errors.js';
 import { requirePermission } from '../middleware/requirePermission.js';
 import { requireAuth } from '../middleware/auth.js';
 import { recordAudit, fromRequest } from '../services/audit.js';
+import { assertMaintenanceSwitchable } from '../services/maintenance.js';
 import { settingsPatchSchema, backupFileSchema } from '../validation/schemas.js';
 
 const router = express.Router();
@@ -24,6 +25,7 @@ const DEFAULTS = [
   { key: 'alert_retention_days', value: '90', label: 'Alert retention (days)', group: 'security', type: 'number' },
   { key: 'allow_self_service_rfid', value: 'false', label: 'Allow self-service RFID issuance', group: 'operations', type: 'boolean' },
   { key: 'maintenance_mode', value: 'false', label: 'Maintenance mode', group: 'operations', type: 'boolean' },
+  { key: 'maintenance_message', value: 'Server is currently under maintenance. Please try again later.', label: 'Maintenance message', group: 'operations' },
 ];
 
 function readSettings(db) {
@@ -52,6 +54,7 @@ const KEY_TO_SETTING = {
   alertRetentionDays: 'alert_retention_days',
   allowSelfServiceRfid: 'allow_self_service_rfid',
   maintenanceMode: 'maintenance_mode',
+  maintenanceMessage: 'maintenance_message',
 };
 
 router.get(
@@ -93,6 +96,11 @@ const updateSettings = asyncHandler(async (req, res) => {
       const definition = DEFAULTS.find((entry) => entry.key === key);
       const type = definition?.type ?? 'string';
       const value = type === 'boolean' ? String(Boolean(req.body[field])) : String(req.body[field]);
+
+      // Turning maintenance ON with nobody able to turn it off would lock the
+      // whole campus out, so refuse it until a Super Administrator exists.
+      if (key === 'maintenance_mode') assertMaintenanceSwitchable(db, value === 'true');
+
       changed[key] = value;
 
       db.prepare(

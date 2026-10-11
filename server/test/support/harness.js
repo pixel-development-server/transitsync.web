@@ -10,12 +10,15 @@ process.env.NODE_ENV = 'test';
 // signing secret so runs are reproducible on any machine.
 process.env.BOOTSTRAP_ADMIN_EMAIL = 'admin@transitsync.edu.np';
 process.env.BOOTSTRAP_ADMIN_PASSWORD = 'TransitSync@2024';
+process.env.SUPER_ADMIN_EMAIL = 'super@transitsync.me';
+process.env.SUPER_ADMIN_PASSWORD = 'SuperRoot!2024x';
+process.env.SUPER_ADMIN_NAME = 'Platform Super Administrator';
 process.env.JWT_SECRET = 'test-signing-secret-not-used-in-production-000000';
 
 const { openDatabase } = await import('../../src/db/driver.js');
 const { setDb, getDb } = await import('../../src/db/connection.js');
 const { runMigrations } = await import('../../src/db/migrate.js');
-const { ensureBootstrapAdmin, seedDemo, seedSettings } = await import('../../src/db/seed.js');
+const { ensureBootstrapAdmin, ensureSuperAdmin, seedDemo, seedSettings } = await import('../../src/db/seed.js');
 const { createApp } = await import('../../src/app.js');
 const { ROLE_KEYS } = await import('../../src/db/permissions.js');
 // bcryptjs ships its helpers on the default export when loaded dynamically.
@@ -23,14 +26,18 @@ const bcrypt = (await import('bcryptjs')).default;
 
 export const ADMIN_EMAIL = 'admin@transitsync.edu.np';
 export const ADMIN_PASSWORD = 'TransitSync@2024';
+export const SUPER_ADMIN_EMAIL = 'super@transitsync.me';
+export const SUPER_ADMIN_PASSWORD = 'SuperRoot!2024x';
 // Deliberately free of the email local-part and the display name, so the
 // password policy (which rejects "admin" here) does not reject the rotation.
 export const ROTATED_ADMIN_PASSWORD = 'Bright7Falcon!Quartz';
+export const SUPER_ROTATED_PASSWORD = 'Cobalt7!Marlin2026';
 export const STAFF_PASSWORD = 'TransitStaff@2024';
 
 // The suite rotates the admin password mid-run to prove the forced-change gate
 // works, so the helper has to remember which credential is currently valid.
 let currentAdminPassword = ADMIN_PASSWORD;
+let currentSuperPassword = SUPER_ADMIN_PASSWORD;
 
 let cached = null;
 
@@ -46,6 +53,7 @@ export async function bootServer({ demo = true } = {}) {
   runMigrations(db, { log: () => {} });
   seedSettings(db);
   ensureBootstrapAdmin(db);
+  ensureSuperAdmin(db);
   if (demo) seedDemo(db);
 
   const app = createApp();
@@ -159,6 +167,43 @@ export async function loginAdmin(context) {
   }
 
   currentAdminPassword = ROTATED_ADMIN_PASSWORD;
+  return rotated.body.data;
+}
+
+/**
+ * Sign in as the Level 200 Super Administrator, rotating the forced first-login
+ * credential once. Mirrors `loginAdmin` for the platform owner.
+ */
+export async function loginSuperAdmin(context) {
+  const attempt = (password) =>
+    call(context, 'POST', '/api/auth/login', { body: { email: SUPER_ADMIN_EMAIL, password } });
+
+  let response = await attempt(currentSuperPassword);
+  if (response.status !== 200 && currentSuperPassword !== SUPER_ROTATED_PASSWORD) {
+    currentSuperPassword = SUPER_ROTATED_PASSWORD;
+    response = await attempt(currentSuperPassword);
+  }
+  if (response.status !== 200) {
+    throw new Error(`Super admin login failed: ${response.status} ${JSON.stringify(response.body)}`);
+  }
+
+  const session = response.body.data;
+  if (!session.mustChangePassword) return session;
+
+  const rotated = await call(context, 'POST', '/api/auth/change-password', {
+    token: session.token,
+    body: {
+      currentPassword: currentSuperPassword,
+      newPassword: SUPER_ROTATED_PASSWORD,
+      confirmPassword: SUPER_ROTATED_PASSWORD,
+      revokeOtherSessions: false,
+    },
+  });
+  if (rotated.status !== 200) {
+    throw new Error(`Super admin rotation failed: ${rotated.status} ${JSON.stringify(rotated.body)}`);
+  }
+
+  currentSuperPassword = SUPER_ROTATED_PASSWORD;
   return rotated.body.data;
 }
 

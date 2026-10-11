@@ -7,6 +7,7 @@ import config from '../config/env.js';
 import { getDb, closeDb } from './connection.js';
 import { runMigrations } from './migrate.js';
 import { ROLE_KEYS } from './permissions.js';
+import { DEFAULT_TENANT_ID, stampDefaultTenant } from './tenants.js';
 
 const SALT_ROUNDS = 12;
 
@@ -38,12 +39,48 @@ export function ensureBootstrapAdmin(db) {
   db.prepare(
     `INSERT INTO users
        (email, full_name, password_hash, job_title, department, role_id, status,
-        is_first_login, password_changed, force_password_reset, permissions_mode)
-     VALUES (?, ?, ?, 'System Administrator', 'Administration', ?, 'active', 1, 0, 0, 'INHERIT')
+        tenant_id, is_first_login, password_changed, force_password_reset, permissions_mode)
+     VALUES (?, ?, ?, 'System Administrator', 'Administration', ?, 'active', ?, 1, 0, 0, 'INHERIT')
      ON CONFLICT(email) DO NOTHING`,
-  ).run(email, name, passwordHash, role.id);
+  ).run(email, name, passwordHash, role.id, DEFAULT_TENANT_ID);
 
   db.prepare("INSERT OR REPLACE INTO system_meta (key, value, updated_at) VALUES ('initialised_at', datetime('now'), datetime('now'))").run();
+
+  return { email, created: true };
+}
+
+/**
+ * Ensure a Level 200 Platform Super Administrator exists when (and only when)
+ * `SUPER_ADMIN_EMAIL` and `SUPER_ADMIN_PASSWORD` are configured.
+ *
+ * Idempotent and safe on every boot: it acts only if no `super_admin` account
+ * exists yet. The account is flagged for a forced first-login rotation, exactly
+ * like the bootstrap administrator, so the environment credential is never the
+ * long-term one.
+ *
+ * @returns {{email:string, created:boolean}|null} null when not configured.
+ */
+export function ensureSuperAdmin(db) {
+  const { email, password, name } = config.superAdmin;
+  if (!email || !password) return null;
+
+  const role = db.prepare('SELECT id FROM roles WHERE key = ?').get(ROLE_KEYS.SUPER_ADMIN);
+  if (!role) return null;
+
+  const existing = db
+    .prepare('SELECT u.email FROM users u JOIN roles r ON r.id = u.role_id WHERE r.key = ? LIMIT 1')
+    .get(ROLE_KEYS.SUPER_ADMIN);
+  if (existing) return { email: existing.email, created: false };
+
+  const passwordHash = bcrypt.hashSync(password, SALT_ROUNDS);
+
+  db.prepare(
+    `INSERT INTO users
+       (email, full_name, password_hash, job_title, department, role_id, status,
+        is_first_login, password_changed, force_password_reset, permissions_mode)
+     VALUES (?, ?, ?, 'Platform Super Administrator', 'Platform', ?, 'active', 1, 0, 0, 'INHERIT')
+     ON CONFLICT(email) DO NOTHING`,
+  ).run(email, name, passwordHash, role.id);
 
   return { email, created: true };
 }
@@ -58,6 +95,7 @@ export function seedSettings(db) {
     ['alert_retention_days', '90', 'security', 'Alert retention (days)', 'number'],
     ['allow_self_service_rfid', 'false', 'operations', 'Allow self-service RFID issuance', 'boolean'],
     ['maintenance_mode', 'false', 'operations', 'Maintenance mode', 'boolean'],
+    ['maintenance_message', 'Server is currently under maintenance. Please try again later.', 'operations', 'Maintenance message', 'string'],
   ];
 
   const insert = db.prepare(
@@ -417,6 +455,11 @@ export function seedDemo(db) {
     db.prepare(
       "INSERT OR REPLACE INTO system_meta (key, value, updated_at) VALUES ('demo_seeded_at', datetime('now'), datetime('now'))",
     ).run();
+
+    // Attach every seeded row to the default campus so a fresh install is a
+    // coherent single-tenant dataset (the migration only backfills pre-existing
+    // rows, and seeding runs after it).
+    stampDefaultTenant(db);
   });
 
   return {

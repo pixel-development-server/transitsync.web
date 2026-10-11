@@ -340,7 +340,21 @@ export const settingsPatchSchema = z.object({
   alertRetentionDays: z.coerce.number().int().min(1).max(3650).optional(),
   allowSelfServiceRfid: z.coerce.boolean().optional(),
   maintenanceMode: z.coerce.boolean().optional(),
+  maintenanceMessage: trimmed(1, 300).optional(),
 });
+
+/**
+ * Platform Super Administrator maintenance switch. At least one field must be
+ * present so an empty body cannot silently no-op.
+ */
+export const maintenanceSchema = z
+  .object({
+    enabled: z.coerce.boolean().optional(),
+    message: trimmed(1, 300).optional(),
+  })
+  .refine((data) => data.enabled !== undefined || data.message !== undefined, {
+    message: 'Provide enabled and/or message.',
+  });
 
 // ---------------------------------------------------------------------------
 // Shared param schemas
@@ -381,6 +395,7 @@ export const schemas = {
   deviceEventSchema,
   deviceBatchSchema,
   settingsPatchSchema,
+  maintenanceSchema,
   idSchema,
   sessionIdSchema,
   backupFileSchema,

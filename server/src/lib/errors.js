@@ -47,6 +47,15 @@ export const serviceLocked = (message = 'The TransitSync system is under mainten
   new AppError(503, message, { code: 'SYSTEM_LOCKDOWN' });
 
 /**
+ * Raised while global maintenance mode is on. Distinct from `serviceLocked`:
+ * this one refuses *sign-in* for campus accounts (levels 1–100) while letting
+ * the Level 200 platform owner through, whereas `serviceLocked` freezes live
+ * sessions of the emergency lockout.
+ */
+export const maintenanceMode = (message = 'Server is currently under maintenance. Please try again later.') =>
+  new AppError(503, message, { code: 'MAINTENANCE_MODE' });
+
+/**
  * The forced first-login rotation gate. It gets its own top-level code so a
  * client can branch on it without having to reach into `details` — the UI needs
  * to route to the change-password screen rather than show a generic 403.

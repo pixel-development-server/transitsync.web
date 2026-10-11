@@ -128,17 +128,33 @@ export const PERMISSION_INDEX = MODULES.flatMap((module) =>
 );
 
 export const ROLE_KEYS = {
+  SUPER_ADMIN: 'super_admin',
   SYSTEM_ADMIN: 'system_admin',
   ADMIN: 'admin',
   TRANSPORT_STAFF: 'transport_staff',
   ATTENDANT: 'attendant',
+  STUDENT: 'student',
 };
 
 /**
- * Default permission sets for the three system roles.
+ * The platform-owner level. Everything at or above this level is a Super
+ * Administrator; the maintenance gate in `/auth/login` treats it as the sole
+ * bypass, and the Super Admin panel is gated on the same threshold.
+ */
+export const SUPER_ADMIN_LEVEL = 200;
+
+/**
+ * Default permission sets for the system roles.
  * `system_admin` intentionally receives everything and is re-synced on every seed.
  */
 export const ROLE_DEFAULTS = {
+  [ROLE_KEYS.SUPER_ADMIN]: {
+    label: 'Super Administrator',
+    description:
+      'Platform owner above every campus. The only role that can provision or suspend colleges and toggle global maintenance mode. Holds the full catalogue for platform-wide oversight.',
+    level: SUPER_ADMIN_LEVEL,
+    permissions: ALL_PERMISSIONS,
+  },
   [ROLE_KEYS.SYSTEM_ADMIN]: {
     label: 'System Administrator',
     description:
@@ -190,6 +206,15 @@ export const ROLE_DEFAULTS = {
       'attendance:read',
       'alerts:read',
     ],
+  },
+  [ROLE_KEYS.STUDENT]: {
+    label: 'Student (Read-Only)',
+    description:
+      'Rider account. The holder sees only their own route, bus, driver and live status in the read-only Student Portal — never the operations console.',
+    level: 1,
+    // Deliberately empty: the Student Portal is gated on the role itself, not on
+    // a console permission, so a student can never reach an administrative view.
+    permissions: [],
   },
 };
 

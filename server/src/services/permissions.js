@@ -17,8 +17,9 @@ const TRUE = 1;
  *              grid shows the live effective set, "replace" semantics are what
  *              makes un-ticking a box actually revoke the permission.
  *
- * `isSuperAdmin` short-circuits everything: the System Administrator always has
- * every permission, even if the catalogue grows after the role was granted.
+ * `isSuperAdmin` short-circuits everything: the Super Administrator (Level 200)
+ * and System Administrator (Level 100) always hold every permission, even if
+ * the catalogue grows after the role was granted.
  */
 export function resolvePermissions(db, user) {
   if (!user) return new Set();
@@ -27,7 +28,9 @@ export function resolvePermissions(db, user) {
     ? db.prepare('SELECT r.id, r.key, r.level FROM roles r WHERE r.key = ?').get(user.role_key)
     : null;
 
-  if (role?.key === 'system_admin') return new Set(ALL_PERMISSIONS);
+  if (role?.key === 'system_admin' || role?.key === 'super_admin') {
+    return new Set(ALL_PERMISSIONS);
+  }
 
   const overrides = db
     .prepare(
