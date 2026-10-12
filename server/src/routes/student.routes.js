@@ -207,7 +207,7 @@ router.get(
   '/routes',
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const me = db.prepare('SELECT id, tenant_id, route_id FROM students WHERE user_id = ?').get(req.user.id);
+    const me = db.prepare('SELECT id, tenant_id FROM students WHERE user_id = ?').get(req.user.id);
     const tenant = me?.tenant_id ?? null;
 
     const rows = db

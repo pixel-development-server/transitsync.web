@@ -118,41 +118,6 @@ function sqliteNow() {
   return new Date().toISOString().replace('T', ' ').slice(0, 19);
 }
 
-/** Capacity guard: refuse allocations that would overfill a bus. */
-function assertBusCapacity(db, busId, { excludeStudentId = null, delta = 1 } = {}) {
-  if (!busId) return null;
-  const bus = db.prepare('SELECT id, code, seat_capacity FROM buses WHERE id = ?').get(busId);
-  if (!bus) return null;
-
-  const assigned = db
-    .prepare('SELECT COUNT(*) AS n FROM students WHERE bus_id = ? AND status = ? AND id <> ?')
-    .get(busId, 'ACTIVE', excludeStudentId ?? 0).n;
-
-  if (assigned + delta > bus.seat_capacity) {
-    throw conflict(`${bus.code} is at capacity (${assigned}/${bus.seat_capacity} seats allocated).`);
-  }
-  return bus;
-}
-
-/**
- * Keep the route/bus pairing consistent. When a bus is picked without an
- * explicit route, the student inherits the bus's current route.
- */
-function normaliseAllocation(db, body, { partial = false } = {}) {
-  const busId = partial ? (body.busId ?? undefined) : (body.busId ?? null);
-  const routeId = partial ? (body.routeId ?? undefined) : (body.routeId ?? null);
-
-  if (busId) {
-    const bus = db.prepare('SELECT current_route_id FROM buses WHERE id = ?').get(busId);
-    if (!bus) throw badRequest('The selected bus does not exist.');
-    if (body.routeId === null || body.routeId === undefined) {
-      if (routeId === undefined || routeId === null) return { busId, routeId: bus.current_route_id ?? null };
-    }
-  }
-
-  return { busId, routeId };
-}
-
 /** Persist a card lifecycle change and fetch the fresh row. */
 function applyCardState(db, id, existing, { status, reason = null }) {
   const columns = cardColumns({ status, existing, reason });
@@ -268,6 +233,9 @@ router.get(
     const scope = operationalTenantScope(db, req.user, req.query);
     const totals = db
       .prepare(
+        // Buses attach to routes now, not to individual students, so the old
+        // `students.bus_id` column no longer exists and nothing is allocated
+        // per-student. Keep the metric at 0 for shape compatibility.
         `SELECT
            COUNT(*) AS total,
            SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
@@ -276,7 +244,7 @@ router.get(
            SUM(CASE WHEN card_status = 'ISSUED' THEN 1 ELSE 0 END) AS issued,
            SUM(CASE WHEN card_status = 'ACTIVE' THEN 1 ELSE 0 END) AS active_cards,
            SUM(CASE WHEN card_status = 'REVOKED' THEN 1 ELSE 0 END) AS revoked,
-           SUM(CASE WHEN bus_id IS NULL AND status = 'ACTIVE' THEN 1 ELSE 0 END) AS unallocated
+           0 AS unallocated
          FROM students WHERE ${scope.clause}`,
       )
       .get(...scope.params);
@@ -301,7 +269,7 @@ router.get(
     const scope = operationalTenantScope(db, req.user, req.query);
     const rows = db
       .prepare(
-        `SELECT id, full_name, college_id, rfid_serial, card_status, status, bus_id
+        `SELECT id, full_name, college_id, rfid_serial, card_status, status
            FROM students WHERE ${scope.clause} ORDER BY id DESC LIMIT 25`,
       )
       .all(...scope.params);

@@ -115,21 +115,6 @@ function shapeRoute(row) {
   };
 }
 
-/** Warn when an allocation would leave a bus over its certified seat count. */
-function assertAllocationFits(db, busId, studentId = 0) {
-  if (!busId) return;
-  const bus = db.prepare('SELECT id, code, seat_capacity FROM buses WHERE id = ?').get(busId);
-  if (!bus) throw badRequest('The selected bus does not exist.');
-  const assigned = db
-    .prepare("SELECT COUNT(*) AS n FROM students WHERE bus_id = ? AND status = 'ACTIVE' AND id <> ?")
-    .get(busId, studentId).n;
-  if (assigned > bus.seat_capacity) {
-    throw conflict(
-      `${bus.code} already has ${assigned} students allocated but only ${bus.seat_capacity} certified seats.`,
-    );
-  }
-}
-
 // ===========================================================================
 // Buses
 // ===========================================================================
@@ -334,8 +319,6 @@ busesRouter.patch(
       `UPDATE buses SET ${Object.keys(columns).map((key) => `${key} = ?`).join(', ')},
                         updated_at = datetime('now') WHERE id = ?`,
     ).run(...Object.values(columns), id);
-
-    if (body.currentRouteId !== undefined) assertAllocationFits(db, id);
 
     recordAudit(fromRequest(req, 'bus.update', { entity: 'bus', entityId: id, detail: { fields: Object.keys(columns) } }));
 
@@ -575,10 +558,9 @@ routesRouter.delete(
     if (!route) throw notFound('Route');
     assertCampusRowVisible(req.user, route, 'Route');
 
-    const students = db.prepare("SELECT COUNT(*) AS n FROM students WHERE route_id = ? AND status = 'ACTIVE'").get(id).n;
     const buses = db.prepare('SELECT COUNT(*) AS n FROM buses WHERE current_route_id = ?').get(id).n;
-    if (students > 0 || buses > 0) {
-      throw conflict(`${route.code} is still referenced by ${buses} bus(es) and ${students} student(s).`);
+    if (buses > 0) {
+      throw conflict(`${route.code} is still referenced by ${buses} bus(es).`);
     }
 
     db.prepare('DELETE FROM routes WHERE id = ?').run(id);

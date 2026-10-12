@@ -49,10 +49,9 @@ router.get(
     const samples = db
       .prepare(
         `SELECT s.id, s.full_name, s.college_id, s.rfid_serial, s.card_status,
-                s.card_issued_at, s.status, s.bus_id, s.route_id,
-                b.code AS bus_code,
-                (SELECT r.code FROM routes r WHERE r.id = s.route_id) AS route_code
-           FROM students s LEFT JOIN buses b ON b.id = s.bus_id
+                s.card_issued_at, s.status, s.onboard_bus_id AS bus_id,
+                NULL AS route_id, b.code AS bus_code, NULL AS route_code
+           FROM students s LEFT JOIN buses b ON b.id = s.onboard_bus_id
           WHERE s.rfid_serial IS NOT NULL
           ORDER BY s.id DESC LIMIT 60`,
       )
@@ -217,7 +216,7 @@ router.post(
             .prepare(
               `SELECT rfid_serial FROM students
                 WHERE rfid_serial IS NOT NULL AND status = 'ACTIVE' AND card_status = 'ACTIVE'
-                  AND bus_id = ?
+                  AND onboard_bus_id = ?
                 LIMIT 1`,
             )
             .get(bus.id);
@@ -238,7 +237,7 @@ router.post(
             .prepare(
               `SELECT rfid_serial FROM students
                 WHERE rfid_serial IS NOT NULL AND card_status = 'ACTIVE'
-                  AND (bus_id IS NULL OR bus_id <> ?) LIMIT 1`,
+                  AND (onboard_bus_id IS NULL OR onboard_bus_id <> ?) LIMIT 1`,
             )
             .get(bus.id);
           return row?.rfid_serial ?? 'TS-SCEN-WRONGBUS';
@@ -257,15 +256,14 @@ router.post(
 
       const revoked = outcome === 'INVALID';
       db.prepare(
-        `INSERT INTO students (full_name, college_id, rfid_serial, rfid_status, card_status, status, bus_id)
-         VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?)`,
+        `INSERT INTO students (full_name, college_id, rfid_serial, rfid_status, card_status, status)
+         VALUES (?, ?, ?, ?, ?, 'ACTIVE')`,
       ).run(
         revoked ? 'Revoked Test Student' : 'Scenario Test Student',
         `SCEN-${scratchSerial.slice(-7)}`,
         scratchSerial,
         revoked ? 'BLOCKED' : 'ACTIVE',
         revoked ? 'REVOKED' : 'ACTIVE',
-        bus.id,
       );
     }
 

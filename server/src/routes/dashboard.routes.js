@@ -30,7 +30,7 @@ router.get(
         `SELECT COUNT(*) AS total,
                 SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
                 SUM(CASE WHEN onboard_bus_id IS NOT NULL THEN 1 ELSE 0 END) AS onboard,
-                SUM(CASE WHEN bus_id IS NULL AND status = 'ACTIVE' THEN 1 ELSE 0 END) AS unallocated,
+                0 AS unallocated,
                 SUM(CASE WHEN card_status = 'UNASSIGNED' THEN 1 ELSE 0 END) AS withoutCard,
                 SUM(CASE WHEN card_status = 'ACTIVE' THEN 1 ELSE 0 END) AS activeCards,
                 SUM(CASE WHEN card_status = 'REVOKED' THEN 1 ELSE 0 END) AS revokedCards
@@ -86,7 +86,7 @@ router.get(
                 r.shift AS route_shift, r.departure_time, r.arrival_time,
                 b.driver_name, b.driver_phone,
                 (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy,
-                (SELECT COUNT(*) FROM students s WHERE s.bus_id = b.id AND s.status = 'ACTIVE') AS allocated,
+                0 AS allocated,
                 (SELECT COALESCE(SUM(v.count), 0) FROM visitor_counts v
                   WHERE v.bus_id = b.id AND v.day = ?) AS visitors
            FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id
