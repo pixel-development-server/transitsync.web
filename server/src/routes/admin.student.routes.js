@@ -97,7 +97,7 @@ router.get(
 );
 
 router.post(
-  '/student-users/:id/reset-password',
+  '/student-accounts/:id/reset-password',
   requirePermission('users:edit'),
   validate(idSchema, 'params'),
   asyncHandler(async (req, res) => {
@@ -129,7 +129,7 @@ router.post(
 );
 
 router.delete(
-  '/student-users/:id',
+  '/student-accounts/:id',
   requirePermission('users:delete'),
   validate(idSchema, 'params'),
   asyncHandler(async (req, res) => {
