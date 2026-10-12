@@ -44,6 +44,7 @@ const Users = lazy(() => import('./pages/Users.jsx'));
 const Roles = lazy(() => import('./pages/Roles.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
 const Profile = lazy(() => import('./pages/Profile.jsx'));
+const StudentManagement = lazy(() => import('./pages/StudentManagement.jsx'));
 const Colleges = lazy(() => import('./pages/super-admin/Colleges.jsx'));
 const PlatformSystem = lazy(() => import('./pages/super-admin/SystemPanel.jsx'));
 const StudentPortal = lazy(() => import('./pages/student/StudentPortal.jsx'));
@@ -254,7 +255,11 @@ function AppRoutes() {
               path="students"
               element={
                 <PermissionGate permission="students:read">
-                  <Students />
+                  {Number(user?.roleLevel ?? 0) >= 200 || user?.role === 'super_admin' ? (
+                    <Navigate to="/admin/colleges" replace />
+                  ) : (
+                    <Students />
+                  )}
                 </PermissionGate>
               }
             />
@@ -262,7 +267,11 @@ function AppRoutes() {
               path="students/:id"
               element={
                 <PermissionGate permission="students:read">
-                  <StudentDetail />
+                  {Number(user?.roleLevel ?? 0) >= 200 || user?.role === 'super_admin' ? (
+                    <Navigate to="/admin/colleges" replace />
+                  ) : (
+                    <StudentDetail />
+                  )}
                 </PermissionGate>
               }
             />
@@ -278,7 +287,11 @@ function AppRoutes() {
               path="fleet"
               element={
                 <PermissionGate permission="fleet:read">
-                  <Fleet />
+                  {Number(user?.roleLevel ?? 0) >= 200 || user?.role === 'super_admin' ? (
+                    <Navigate to="/admin/colleges" replace />
+                  ) : (
+                    <Fleet />
+                  )}
                 </PermissionGate>
               }
             />
@@ -288,6 +301,14 @@ function AppRoutes() {
               element={
                 <PermissionGate permission="users:read">
                   <Users />
+                </PermissionGate>
+              }
+            />
+            <Route
+              path="admin/student-users"
+              element={
+                <PermissionGate permission="users:read">
+                  <StudentManagement />
                 </PermissionGate>
               }
             />
@@ -326,6 +347,7 @@ function AppRoutes() {
               }
             />
             <Route path="super-admin" element={<Navigate to="/super-admin/colleges" replace />} />
+            <Route path="/admin/colleges" element={<Navigate to="/super-admin/colleges" replace />} />
 
             {/* Unknown paths fall back to the Dashboard instead of a dead-end
                 "Page not found", so stale bookmarks and typos still show the app. */}

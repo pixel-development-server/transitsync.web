@@ -13,6 +13,7 @@ import scanRoutes from './scans.routes.js';
 import streamRoutes from './stream.routes.js';
 import settingsRoutes from './settings.routes.js';
 import adminRoutes from './admin.routes.js';
+import adminStudentRoutes from './admin.student.routes.js';
 import systemRoutes from './system.routes.js';
 import institutionRoutes from './institution.routes.js';
 import superAdminRoutes from './superadmin.routes.js';
@@ -88,6 +89,7 @@ router.use('/settings', settingsRoutes);
 router.use('/system', settingsRoutes);
 // System Control — exclusive to the Level 100 System Administrator.
 router.use('/admin', adminRoutes);
+router.use('/admin', adminStudentRoutes);
 // Tenant-scoped maintenance — campus System Administrator (Level 100) or the
 // Level 200 platform owner.
 router.use('/institution', institutionRoutes);

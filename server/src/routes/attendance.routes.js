@@ -14,7 +14,7 @@ const router = express.Router();
 router.use(requireAuth);
 
 const SELECT_SCAN = `
-  SELECT e.id, e.rfid_serial, e.student_id, e.bus_id, e.route_id, e.direction, e.outcome,
+  SELECT e.id, e.rfid_serial, e.student_id, e.direction, e.outcome,
          e.message, e.latitude, e.longitude, e.gate, e.occupancy_after, e.scan_time,
          s.full_name AS student_name, s.college_id, s.faculty,
          b.code AS bus_code, b.name AS bus_name, b.seat_capacity,
@@ -378,3 +378,4 @@ function describeFilters(query) {
 }
 
 export default router;
+

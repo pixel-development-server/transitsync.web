@@ -503,6 +503,48 @@ export function Modal({ open, onClose, title, subtitle, children, footer, size =
   );
 }
 
+export function Button({ children, className = '', variant = 'primary', size = 'md', type = 'button', ...props }) {
+  const variants = {
+    primary: 'btn-primary',
+    ghost: 'btn-ghost',
+    danger: 'btn-danger',
+    'danger-ghost': 'btn-ghost text-red-400 hover:text-red-300',
+  };
+  const sizes = {
+    sm: '!px-2.5 !py-1.5 text-xs',
+    md: '',
+    lg: '!px-4 !py-2.5 text-sm',
+  };
+  return (
+    <button type={type} className={`btn ${variants[variant] || ''} ${sizes[size] || ''} ${className}`} {...props}>
+      {children}
+    </button>
+  );
+}
+
+export function Input({ className = '', ...props }) {
+  return <input className={`field ${className}`} {...props} />;
+}
+
+export function Select({ className = '', children, ...props }) {
+  return (
+    <select className={`field ${className}`} {...props}>
+      {children}
+    </select>
+  );
+}
+
+export function Toggle({ checked, onChange, disabled = false, label }) {
+  return (
+    <label className={`flex items-center gap-2 text-sm ${disabled ? 'opacity-60' : 'cursor-pointer'}`}>
+      <input type="checkbox" checked={checked} onChange={(e) => onChange?.(e.target.checked)} disabled={disabled} />
+      {label}
+    </label>
+  );
+}
+
+export const Table = DataTable;
+
 export function ConfirmDialog({
   open,
   onClose,

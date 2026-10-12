@@ -20,6 +20,7 @@ import { useAuth } from '../lib/auth.jsx';
 import { useApi, useDebounced } from '../lib/hooks.js';
 import { useToast } from '../lib/toast.jsx';
 import { titleCase } from '../lib/format.js';
+import { CampusSelect, useCampusDirectory, usePlatformScope } from '../components/CampusScope.jsx';
 
 const TABS = [
   { key: 'buses', label: 'Buses', permission: 'fleet:read' },
@@ -29,15 +30,15 @@ const TABS = [
 const EMPTY_BUS = {
   code: '', registrationNo: '', name: '', makeModel: '', seatCapacity: 40,
   driverName: '', driverPhone: '', driverLicense: '', status: 'ACTIVE',
-  currentRouteId: '', odometerKm: 0, lastServiceAt: '',
+  currentRouteId: '', odometerKm: 0, lastServiceAt: '', tenantId: '',
 };
 
 const EMPTY_ROUTE = {
   code: '', name: '', description: '', startPoint: '', endPoint: '',
-  shift: 'MORNING', departureTime: '07:00', arrivalTime: '09:00', color: '#38BDF8', isActive: true,
+  shift: 'MORNING', departureTime: '07:00', arrivalTime: '09:00', color: '#38BDF8', isActive: true, tenantId: '',
 };
 
-function BusDialog({ open, onClose, onSaved, bus, routes }) {
+function BusDialog({ open, onClose, onSaved, bus, routes, isPlatform, tenantId, colleges = [] }) {
   const toast = useToast();
   const [form, setForm] = useState(EMPTY_BUS);
   const [error, setError] = useState(null);
@@ -53,10 +54,11 @@ function BusDialog({ open, onClose, onSaved, bus, routes }) {
             ...Object.fromEntries(Object.keys(EMPTY_BUS).map((key) => [key, bus[key] ?? EMPTY_BUS[key]])),
             currentRouteId: bus.currentRouteId ?? bus.route?.id ?? '',
             lastServiceAt: bus.lastServiceAt ? String(bus.lastServiceAt).slice(0, 10) : '',
+            tenantId: bus.tenantId ?? '',
           }
-        : { ...EMPTY_BUS },
+        : { ...EMPTY_BUS, tenantId: isPlatform ? (tenantId ?? '') : '' },
     );
-  }, [open, bus]);
+  }, [open, bus, isPlatform, tenantId]);
 
   const set = useCallback(
     (key) => (event) => {
@@ -80,6 +82,12 @@ function BusDialog({ open, onClose, onSaved, bus, routes }) {
         return [key, typeof value === 'string' ? value.trim() : value];
       }),
     );
+    if (!bus && isPlatform) {
+      if (tenantId) payload.tenantId = tenantId;
+      else delete payload.tenantId;
+    } else {
+      delete payload.tenantId;
+    }
 
     try {
       if (bus) {
@@ -332,7 +340,7 @@ function StopsDialog({ open, onClose, onSaved, route }) {
   );
 }
 
-function RouteDialog({ open, onClose, onSaved, route }) {
+function RouteDialog({ open, onClose, onSaved, route, isPlatform = false, tenantId = '', colleges = [] }) {
   const toast = useToast();
   const [form, setForm] = useState(EMPTY_ROUTE);
   const [error, setError] = useState(null);
@@ -341,8 +349,12 @@ function RouteDialog({ open, onClose, onSaved, route }) {
   useEffect(() => {
     if (!open) return;
     setError(null);
-    setForm(route ? { ...EMPTY_ROUTE, ...route } : { ...EMPTY_ROUTE });
-  }, [open, route]);
+    setForm(
+      route
+        ? { ...EMPTY_ROUTE, ...route }
+        : { ...EMPTY_ROUTE, tenantId: isPlatform ? (tenantId ?? '') : '' },
+    );
+  }, [open, route, isPlatform, tenantId]);
 
   const set = useCallback((key) => (event) => {
     const value = event?.target ? event.target.value : event;
@@ -357,11 +369,18 @@ function RouteDialog({ open, onClose, onSaved, route }) {
     setError(null);
     setSaving(true);
     try {
+      const payload = { ...form };
+      if (!route && isPlatform) {
+        if (tenantId) payload.tenantId = tenantId;
+        else delete payload.tenantId;
+      } else {
+        delete payload.tenantId;
+      }
       if (route) {
-        await api.patch(`/routes/${route.id}`, form);
+        await api.patch(`/routes/${route.id}`, payload);
         toast.success(`${form.code} updated.`);
       } else {
-        await api.post('/routes', form);
+        await api.post('/routes', payload);
         toast.success(`${form.code} route created.`);
       }
       onSaved();
@@ -449,7 +468,7 @@ function RouteDialog({ open, onClose, onSaved, route }) {
   );
 }
 
-function BusesTab({ onEdit }) {
+function BusesTab({ onEdit, tenantId, isPlatform }) {
   const { can } = useAuth();
   const toast = useToast();
 
@@ -460,9 +479,12 @@ function BusesTab({ onEdit }) {
 
   const debouncedSearch = useDebounced(search);
 
+  const params = { search: debouncedSearch, status };
+  if (isPlatform && tenantId) params.tenantId = tenantId;
+
   const { data, error, loading, reload } = useApi('/buses', {
     enabled: can('fleet:read'),
-    params: { search: debouncedSearch, status },
+    params,
   });
 
   const buses = data?.buses ?? [];
@@ -644,7 +666,7 @@ function BusesTab({ onEdit }) {
   );
 }
 
-function RoutesTab({ onEdit }) {
+function RoutesTab({ onEdit, tenantId, isPlatform }) {
   const { can } = useAuth();
   const toast = useToast();
 
@@ -652,8 +674,12 @@ function RoutesTab({ onEdit }) {
   const [deleting, setDeleting] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
 
+  const params = {};
+  if (isPlatform && tenantId) params.tenantId = tenantId;
+
   const { data, error, loading, reload } = useApi('/routes', {
     enabled: can('fleet:read'),
+    params,
   });
 
   const routes = data?.routes ?? [];
@@ -809,13 +835,21 @@ function RoutesTab({ onEdit }) {
 
 export default function Fleet() {
   const { can } = useAuth();
+  const { isPlatform } = usePlatformScope();
+  const { colleges } = useCampusDirectory(isPlatform);
+
+  const [tenantId, setTenantId] = useState('');
+
   const [tab, setTab] = useState('buses');
   const [busDialog, setBusDialog] = useState({ open: false, bus: null });
   const [routeDialog, setRouteDialog] = useState({ open: false, route: null });
 
+  const fleetParams = {};
+  if (isPlatform && tenantId) fleetParams.tenantId = tenantId;
+
   // One shared reload keeps every tab's data consistent after a write.
-  const { data: routeList, reload: reloadRoutes } = useApi('/routes', { enabled: can('fleet:read') });
-  const { reload: reloadBuses } = useApi('/buses', { enabled: can('fleet:read') });
+  const { data: routeList, reload: reloadRoutes } = useApi('/routes', { enabled: can('fleet:read'), params: fleetParams });
+  const { reload: reloadBuses } = useApi('/buses', { enabled: can('fleet:read'), params: fleetParams });
 
   const refreshAll = useCallback(() => {
     reloadBuses({ silent: true });
@@ -844,25 +878,28 @@ export default function Fleet() {
         }
       />
 
-      <div className="mb-4 flex gap-1 border-b border-[var(--border-subtle)]">
-        {availableTabs.map((entry) => (
-          <button
-            key={entry.key}
-            type="button"
-            onClick={() => setTab(entry.key)}
-            className={`-mb-px border-b-2 px-3.5 py-2 text-[0.82rem] font-semibold transition ${
-              tab === entry.key ? 'border-sky-500 text-sky-300' : 'border-transparent text-mist-500 hover:text-mist-300'
-            }`}
-          >
-            {entry.label}
-          </button>
-        ))}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2.5">
+        <div className="flex gap-1 border-b border-[var(--border-subtle)]">
+          {availableTabs.map((entry) => (
+            <button
+              key={entry.key}
+              type="button"
+              onClick={() => setTab(entry.key)}
+              className={`-mb-px border-b-2 px-3.5 py-2 text-[0.82rem] font-semibold transition ${
+                tab === entry.key ? 'border-sky-500 text-sky-300' : 'border-transparent text-mist-500 hover:text-mist-300'
+              }`}
+            >
+              {entry.label}
+            </button>
+          ))}
+        </div>
+        <CampusSelect isPlatform={isPlatform} colleges={colleges} value={tenantId} onChange={setTenantId} wrapperClass="w-60" />
       </div>
 
       {tab === 'buses' ? (
-        <BusesTab onEdit={editBus} />
+        <BusesTab onEdit={editBus} tenantId={tenantId} isPlatform={isPlatform} />
       ) : (
-        <RoutesTab onEdit={editRoute} />
+        <RoutesTab onEdit={editRoute} tenantId={tenantId} isPlatform={isPlatform} />
       )}
 
       <BusDialog
@@ -871,6 +908,9 @@ export default function Fleet() {
         onSaved={refreshAll}
         bus={busDialog.bus}
         routes={routeList?.routes ?? []}
+        isPlatform={isPlatform}
+        tenantId={tenantId}
+        colleges={colleges}
       />
 
       <RouteDialog
@@ -878,6 +918,9 @@ export default function Fleet() {
         onClose={() => setRouteDialog({ open: false, route: null })}
         onSaved={refreshAll}
         route={routeDialog.route}
+        isPlatform={isPlatform}
+        tenantId={tenantId}
+        colleges={colleges}
       />
     </>
   );

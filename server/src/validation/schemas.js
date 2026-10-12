@@ -9,6 +9,13 @@ const latitude = z.coerce.number().min(-90).max(90).nullable().optional();
 const longitude = z.coerce.number().min(-180).max(180).nullable().optional();
 const idParam = z.coerce.number().int().positive();
 
+/**
+ * Optional campus tenant context accepted on operational reads and writes.
+ * Only a platform principal (level >= 200) may exercise it — campus principals
+ * are server-scoped to their own campus and this field is ignored for them.
+ */
+const platformTenantId = z.string().trim().uuid('Unknown college tenant.').optional();
+
 const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Expected a #RRGGBB colour');
 
 /** Accepts "", null and undefined as "not provided" so empty form fields work. */
@@ -207,23 +214,16 @@ const studentBody = {
   rfidSerial: emptyToNull(
     z.string().trim().toUpperCase().min(4).max(40).regex(/^[A-Z0-9\-]+$/, 'Use letters, digits and dashes only'),
   ).optional(),
-  // College-issued bus card lifecycle. A serial supplied without an explicit
-  // status is treated as an ACTIVE card by the students route.
   cardStatus: z.enum(['UNASSIGNED', 'ISSUED', 'ACTIVE', 'REVOKED']).optional(),
   cardRevokedReason: optionalText(120),
-  routeId: emptyToNull(idParam).optional(),
-  busId: emptyToNull(idParam).optional(),
-  pickupStop: optionalText(160),
   status: z.enum(['ACTIVE', 'SUSPENDED', 'GRADUATED', 'WITHDRAWN']).optional().default('ACTIVE'),
   notes: optionalText(1000),
 };
 
-export const createStudentSchema = z.object(studentBody);
+export const createStudentSchema = z.object({ ...studentBody, tenantId: platformTenantId });
 
 export const updateStudentSchema = z.object({
   ...Object.fromEntries(Object.entries(studentBody).map(([key, schema]) => [key, schema.optional()])),
-  clearBus: z.boolean().optional(),
-  clearRoute: z.boolean().optional(),
 });
 
 export const studentQuerySchema = z.object({
@@ -232,11 +232,12 @@ export const studentQuerySchema = z.object({
   search: z.string().trim().max(120).optional(),
   status: z.enum(['ACTIVE', 'SUSPENDED', 'GRADUATED', 'WITHDRAWN', 'all']).optional(),
   cardStatus: z.enum(['UNASSIGNED', 'ISSUED', 'ACTIVE', 'REVOKED', 'all']).optional(),
-  busId: emptyToNull(idParam).optional(),
-  routeId: emptyToNull(idParam).optional(),
   onboard: z.enum(['true', 'false']).optional(),
   sort: z.enum(['name', 'collegeId', 'created', 'onboard']).optional().default('created'),
   order: z.enum(['asc', 'desc']).optional().default('desc'),
+  // Platform drill-down: a level >= 200 principal chooses the campus whose
+  // registry they are viewing. Ignored for campus principals.
+  tenantId: platformTenantId,
 });
 
 /** Issue (or re-point) a physical card to a student. */
@@ -271,7 +272,7 @@ export const busBody = {
   lastServiceAt: emptyToNull(isoDate).optional(),
 };
 
-export const createBusSchema = z.object(busBody);
+export const createBusSchema = z.object({ ...busBody, tenantId: platformTenantId });
 export const updateBusSchema = z.object(
   Object.fromEntries(Object.entries(busBody).map(([key, schema]) => [key, schema.optional()])),
 );
@@ -289,10 +290,12 @@ export const routeBody = {
   isActive: z.coerce.boolean().optional().default(true),
 };
 
-export const createRouteSchema = z.object(routeBody).refine(
-  (data) => data.departureTime < data.arrivalTime,
-  { message: 'Arrival time must be after departure time', path: ['arrivalTime'] },
-);
+export const createRouteSchema = z
+  .object({ ...routeBody, tenantId: platformTenantId })
+  .refine(
+    (data) => data.departureTime < data.arrivalTime,
+    { message: 'Arrival time must be after departure time', path: ['arrivalTime'] },
+  );
 
 export const updateRouteSchema = z.object(
   Object.fromEntries(Object.entries(routeBody).map(([key, schema]) => [key, schema.optional()])),
@@ -312,6 +315,9 @@ export const fleetQuerySchema = z.object({
   search: z.string().trim().max(120).optional(),
   status: z.string().trim().max(40).optional(),
   routeId: emptyToNull(idParam).optional(),
+  // Platform drill-down: a level >= 200 principal chooses the campus whose
+  // fleet they are viewing. Ignored for campus principals.
+  tenantId: platformTenantId,
 });
 
 // ---------------------------------------------------------------------------

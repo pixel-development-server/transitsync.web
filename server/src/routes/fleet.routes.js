@@ -3,6 +3,7 @@ import express from 'express';
 import { getDb } from '../db/connection.js';
 import { asyncHandler, validate, parsePagination, paginationMeta } from '../lib/http.js';
 import { badRequest, conflict, notFound, unprocessable } from '../lib/errors.js';
+import { operationalTenantScope, resolveOperationalTenant, assertCampusRowVisible } from '../lib/tenantScope.js';
 import { requirePermission } from '../middleware/requirePermission.js';
 import { requireAuth } from '../middleware/auth.js';
 import { recordAudit, fromRequest } from '../services/audit.js';
@@ -155,6 +156,13 @@ busesRouter.get(
       clauses.push('b.current_route_id = ?');
       params.push(routeId);
     }
+    // Campus isolation: campus staff see their own campus, platform principals
+    // only what they explicitly drill into via `tenantId`. The summary queries
+    // read unaliased tables, so they get an unaliased scope of their own.
+    const scope = operationalTenantScope(db, req.user, req.query, 'b');
+    const scopeFlat = operationalTenantScope(db, req.user, req.query);
+    clauses.push(scope.clause);
+    params.push(...scope.params);
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
     const rows = db
@@ -162,7 +170,7 @@ busesRouter.get(
         `SELECT b.*, r.code AS route_code, r.name AS route_name, r.color AS route_color,
                 r.shift AS route_shift, r.departure_time, r.arrival_time,
                 (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy,
-                (SELECT COUNT(*) FROM students s WHERE s.bus_id = b.id AND s.status = 'ACTIVE') AS assigned_students
+                0 AS assigned_students
            FROM buses b
            LEFT JOIN routes r ON r.id = b.current_route_id
            ${where}
@@ -176,11 +184,13 @@ busesRouter.get(
                 SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
                 SUM(CASE WHEN status = 'MAINTENANCE' THEN 1 ELSE 0 END) AS maintenance,
                 SUM(seat_capacity) AS capacity
-           FROM buses`,
+           FROM buses WHERE ${scopeFlat.clause}`,
       )
-      .get();
+      .get(...scopeFlat.params);
 
-    const onboard = db.prepare('SELECT COUNT(*) AS n FROM students WHERE onboard_bus_id IS NOT NULL').get().n;
+    const onboard = db
+      .prepare(`SELECT COUNT(*) AS n FROM students WHERE onboard_bus_id IS NOT NULL AND ${scopeFlat.clause}`)
+      .get(...scopeFlat.params).n;
 
     res.json({
       success: true,
@@ -208,17 +218,18 @@ busesRouter.get(
         `SELECT b.*, r.code AS route_code, r.name AS route_name, r.color AS route_color,
                 r.shift AS route_shift, r.departure_time, r.arrival_time,
                 (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy,
-                (SELECT COUNT(*) FROM students s WHERE s.bus_id = b.id AND s.status = 'ACTIVE') AS assigned_students
+                0 AS assigned_students
            FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id
           WHERE b.id = ?`,
       )
       .get(id);
     if (!row) throw notFound('Bus');
+    assertCampusRowVisible(req.user, row, 'Bus');
 
     const roster = db
       .prepare(
         `SELECT id, full_name, college_id, rfid_serial, onboard_at
-           FROM students WHERE bus_id = ? ORDER BY onboard_at IS NULL, full_name LIMIT 100`,
+           FROM students WHERE onboard_bus_id = ? ORDER BY onboard_at IS NULL, full_name LIMIT 100`,
       )
       .all(id);
 
@@ -253,7 +264,7 @@ busesRouter.post(
       ]);
     }
 
-    const columns = toColumns(body, BUS_COLUMNS);
+    const columns = { ...toColumns(body, BUS_COLUMNS), tenant_id: resolveOperationalTenant(db, req.user, body) };
     const keys = Object.keys(columns);
     const result = db
       .prepare(`INSERT INTO buses (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`)
@@ -282,6 +293,7 @@ busesRouter.patch(
     const id = Number(req.params.id);
     const existing = db.prepare('SELECT * FROM buses WHERE id = ?').get(id);
     if (!existing) throw notFound('Bus');
+    assertCampusRowVisible(req.user, existing, 'Bus');
 
     const body = { ...req.body };
     if (body.currentRouteId) {
@@ -310,9 +322,7 @@ busesRouter.patch(
     if (Object.keys(columns).length === 0) throw badRequest('Nothing to update.');
 
     if (body.seatCapacity !== undefined) {
-      const assigned = db
-        .prepare("SELECT COUNT(*) AS n FROM students WHERE bus_id = ? AND status = 'ACTIVE'")
-        .get(id).n;
+      const assigned = 0;
       if (body.seatCapacity < assigned) {
         throw conflict(
           `${assigned} students are allocated to ${existing.code}; seat capacity cannot drop below that.`,
@@ -334,7 +344,7 @@ busesRouter.patch(
         `SELECT b.*, r.code AS route_code, r.name AS route_name, r.color AS route_color,
                 r.shift AS route_shift, r.departure_time, r.arrival_time,
                 (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy,
-                (SELECT COUNT(*) FROM students s WHERE s.bus_id = b.id AND s.status = 'ACTIVE') AS assigned_students
+                0 AS assigned_students
            FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id WHERE b.id = ?`,
       )
       .get(id);
@@ -353,8 +363,9 @@ busesRouter.delete(
     const id = Number(req.params.id);
     const bus = db.prepare('SELECT * FROM buses WHERE id = ?').get(id);
     if (!bus) throw notFound('Bus');
+    assertCampusRowVisible(req.user, bus, 'Bus');
 
-    const allocated = db.prepare("SELECT COUNT(*) AS n FROM students WHERE bus_id = ? AND status = 'ACTIVE'").get(id).n;
+    const allocated = 0;
     if (allocated > 0) {
       throw conflict(
         `${bus.code} still has ${allocated} active student(s) allocated. Reassign them before deleting it.`,
@@ -389,6 +400,11 @@ routesRouter.get(
       clauses.push('r.is_active = ?');
       params.push(status === 'active' ? 1 : 0);
     }
+    // Campus isolation: campus staff see their own campus, platform principals
+    // only what they explicitly drill into via `tenantId`.
+    const scope = operationalTenantScope(db, req.user, req.query, 'r');
+    clauses.push(scope.clause);
+    params.push(...scope.params);
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
     const rows = db
@@ -396,7 +412,7 @@ routesRouter.get(
         `SELECT r.*,
                 (SELECT COUNT(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stop_count,
                 (SELECT COUNT(*) FROM buses b WHERE b.current_route_id = r.id) AS bus_count,
-                (SELECT COUNT(*) FROM students s WHERE s.route_id = r.id AND s.status = 'ACTIVE') AS student_count
+                0 AS student_count
            FROM routes r ${where}
           ORDER BY r.code ASC`,
       )
@@ -417,11 +433,12 @@ routesRouter.get(
         `SELECT r.*,
                 (SELECT COUNT(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stop_count,
                 (SELECT COUNT(*) FROM buses b WHERE b.current_route_id = r.id) AS bus_count,
-                (SELECT COUNT(*) FROM students s WHERE s.route_id = r.id AND s.status = 'ACTIVE') AS student_count
+                0 AS student_count
            FROM routes r WHERE r.id = ?`,
       )
       .get(Number(req.params.id));
     if (!row) throw notFound('Route');
+    assertCampusRowVisible(req.user, row, 'Route');
 
     const stops = db
       .prepare('SELECT * FROM route_stops WHERE route_id = ? ORDER BY sequence')
@@ -480,7 +497,7 @@ routesRouter.post(
       ]);
     }
 
-    const columns = toColumns(body, ROUTE_COLUMNS);
+    const columns = { ...toColumns(body, ROUTE_COLUMNS), tenant_id: resolveOperationalTenant(db, req.user, body) };
     const keys = Object.keys(columns);
     const result = db
       .prepare(`INSERT INTO routes (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`)
@@ -501,7 +518,9 @@ routesRouter.patch(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    if (!db.prepare('SELECT id FROM routes WHERE id = ?').get(id)) throw notFound('Route');
+    const existing = db.prepare('SELECT * FROM routes WHERE id = ?').get(id);
+    if (!existing) throw notFound('Route');
+    assertCampusRowVisible(req.user, existing, 'Route');
 
     const body = req.body;
     if (body.code !== undefined) {
@@ -536,7 +555,7 @@ routesRouter.patch(
         `SELECT r.*,
                 (SELECT COUNT(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stop_count,
                 (SELECT COUNT(*) FROM buses b WHERE b.current_route_id = r.id) AS bus_count,
-                (SELECT COUNT(*) FROM students s WHERE s.route_id = r.id AND s.status = 'ACTIVE') AS student_count
+                0 AS student_count
            FROM routes r WHERE r.id = ?`,
       )
       .get(id);
@@ -554,6 +573,7 @@ routesRouter.delete(
     const id = Number(req.params.id);
     const route = db.prepare('SELECT * FROM routes WHERE id = ?').get(id);
     if (!route) throw notFound('Route');
+    assertCampusRowVisible(req.user, route, 'Route');
 
     const students = db.prepare("SELECT COUNT(*) AS n FROM students WHERE route_id = ? AND status = 'ACTIVE'").get(id).n;
     const buses = db.prepare('SELECT COUNT(*) AS n FROM buses WHERE current_route_id = ?').get(id).n;
@@ -576,7 +596,9 @@ routesRouter.put(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const routeId = Number(req.params.id);
-    if (!db.prepare('SELECT id FROM routes WHERE id = ?').get(routeId)) throw notFound('Route');
+    const route = db.prepare('SELECT * FROM routes WHERE id = ?').get(routeId);
+    if (!route) throw notFound('Route');
+    assertCampusRowVisible(req.user, route, 'Route');
 
     const sequences = req.body.stops.map((stop) => stop.sequence);
     if (new Set(sequences).size !== sequences.length) {

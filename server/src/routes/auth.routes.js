@@ -763,7 +763,7 @@ router.post(
       ? db.prepare('SELECT password_hash FROM users WHERE id = ?').get(student.user_id)
       : null;
     const hasPassword = linkedAccount ? isPasswordSet(linkedAccount.password_hash) : false;
-    const firstTime = !Number(student.is_claimed) || Boolean(linkedAccount && !hasPassword);
+    const firstTime = Boolean(!linkedAccount) || Boolean(linkedAccount && !hasPassword);
 
     return res.json({
       success: true,
@@ -841,7 +841,7 @@ router.post(
     if (emailClash && isPasswordSet(emailClash.password_hash)) {
       throw conflict('That email address is already in use. Sign in instead.');
     }
-    if (!linkedById && Number(student.is_claimed)) {
+    if (!linkedById && emailClash && isPasswordSet(emailClash.password_hash)) {
       throw conflict('This student account is already active. Sign in instead.');
     }
 
@@ -875,7 +875,7 @@ router.post(
                             updated_at = datetime('now') WHERE id = ?`,
         ).run(passwordHash, pending.id);
         db.prepare(
-          "UPDATE students SET user_id = ?, is_claimed = 1, updated_at = datetime('now') WHERE id = ?",
+          "UPDATE students SET user_id = ?, updated_at = datetime('now') WHERE id = ?",
         ).run(pending.id, student.id);
         return pending.id;
       }
@@ -891,7 +891,7 @@ router.post(
       const id = Number(result.lastInsertRowid);
 
       db.prepare(
-        "UPDATE students SET user_id = ?, is_claimed = 1, updated_at = datetime('now') WHERE id = ?",
+        "UPDATE students SET user_id = ?, updated_at = datetime('now') WHERE id = ?",
       ).run(id, student.id);
 
       return id;

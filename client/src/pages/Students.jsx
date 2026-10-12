@@ -27,6 +27,7 @@ import { useAuth } from '../lib/auth.jsx';
 import { useApi, useDebounced, usePagination } from '../lib/hooks.js';
 import { useToast } from '../lib/toast.jsx';
 import { formatDateTime, formatRelative } from '../lib/format.js';
+import { CampusSelect, useCampusDirectory, usePlatformScope } from '../components/CampusScope.jsx';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -47,10 +48,11 @@ const EMPTY_FORM = {
   pickupStop: '',
   status: 'ACTIVE',
   notes: '',
+  tenantId: '',
 };
 
 /** Create / edit dialog. Numeric selects must send `null`, not `""`. */
-function StudentDialog({ open, onClose, onSaved, student, buses, routes, faculties = [] }) {
+function StudentDialog({ open, onClose, onSaved, student, buses, routes, faculties = [], isPlatform, tenantId, colleges = [] }) {
   const toast = useToast();
   const [form, setForm] = useState(EMPTY_FORM);
   const [error, setError] = useState(null);
@@ -69,10 +71,11 @@ function StudentDialog({ open, onClose, onSaved, student, buses, routes, faculti
             semester: student.semester ?? '',
             routeId: student.routeId ?? '',
             busId: student.busId ?? '',
+            tenantId: student.tenantId ?? '',
           }
-        : { ...EMPTY_FORM },
+        : { ...EMPTY_FORM, tenantId: isPlatform ? (tenantId ?? '') : '' },
     );
-  }, [open, student]);
+  }, [open, student, isPlatform, tenantId]);
 
   const set = useCallback((key) => (event) => {
     const value = event?.target ? event.target.value : event;
@@ -107,6 +110,12 @@ function StudentDialog({ open, onClose, onSaved, student, buses, routes, faculti
         return [key, typeof value === 'string' ? value.trim() : value];
       }),
     );
+    if (!student && isPlatform) {
+      if (tenantId) payload.tenantId = tenantId;
+      else delete payload.tenantId;
+    } else {
+      delete payload.tenantId;
+    }
 
     try {
       if (student) {
@@ -316,8 +325,12 @@ function StudentDialog({ open, onClose, onSaved, student, buses, routes, faculti
 }
 
 export default function Students() {
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const toast = useToast();
+  const { isPlatform } = usePlatformScope();
+  const { colleges } = useCampusDirectory(isPlatform);
+
+  const [tenantId, setTenantId] = useState('');
 
   const { page, limit, goToPage, changeLimit, reset } = usePagination({ defaultLimit: 25 });
 
@@ -334,26 +347,38 @@ export default function Students() {
   // Any filter change invalidates the current page number.
   useEffect(() => {
     reset();
-  }, [debouncedSearch, status, cardStatus, busId, routeId, onboard, reset]);
+  }, [debouncedSearch, status, cardStatus, busId, routeId, onboard, tenantId, reset]);
 
-  const { data: summary } = useApi('/students/summary', { enabled: can('students:read') });
-  const { data: buses } = useApi('/buses', { enabled: can('students:read') && can('fleet:read') });
-  const { data: routes } = useApi('/routes', { enabled: can('students:read') && can('fleet:read') });
+  const listParams = {
+    page,
+    limit,
+    search: debouncedSearch,
+    status,
+    cardStatus,
+    busId,
+    routeId,
+    onboard,
+    sort: sort.key,
+    order: sort.direction,
+  };
+  if (isPlatform && tenantId) listParams.tenantId = tenantId;
+
+  const summaryParams = {};
+  if (isPlatform && tenantId) summaryParams.tenantId = tenantId;
+
+  const fleetParams = {};
+  if (isPlatform && tenantId) fleetParams.tenantId = tenantId;
+
+  const { data: summary } = useApi('/students/summary', { enabled: can('students:read'), params: summaryParams });
+  const { data: busesData } = useApi('/buses', { enabled: can('students:read') && can('fleet:read'), params: fleetParams });
+  const { data: routesData } = useApi('/routes', { enabled: can('students:read') && can('fleet:read'), params: fleetParams });
+
+  const buses = busesData?.buses ?? [];
+  const routes = routesData?.routes ?? [];
 
   const { data, error, loading, refreshing, reload } = useApi('/students', {
     enabled: can('students:read'),
-    params: {
-      page,
-      limit,
-      search: debouncedSearch,
-      status,
-      cardStatus,
-      busId,
-      routeId,
-      onboard,
-      sort: sort.key,
-      order: sort.direction,
-    },
+    params: listParams,
   });
 
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -382,9 +407,10 @@ export default function Students() {
     setBusId('');
     setRouteId('');
     setOnboard('');
+    if (isPlatform) setTenantId('');
   };
 
-  const filtersActive = Boolean(search || status || cardStatus || busId || routeId || onboard);
+  const filtersActive = Boolean(search || status || cardStatus || busId || routeId || onboard || (isPlatform && tenantId));
 
   const confirmDelete = async () => {
     setDeleteBusy(true);
@@ -588,6 +614,7 @@ export default function Students() {
       {/* Filters */}
       <div className="card mb-4 p-3.5">
         <FilterBar onClear={filtersActive ? clearFilters : undefined}>
+          <CampusSelect isPlatform={isPlatform} colleges={colleges} value={tenantId} onChange={setTenantId} wrapperClass="w-60" />
           <Input
             wrapperClass="min-w-[14rem] flex-1"
             placeholder="Search name, college ID or card…"
@@ -707,9 +734,12 @@ export default function Students() {
           reload({ silent: true });
         }}
         student={editing}
-        buses={buses?.buses ?? []}
-        routes={routes?.routes ?? []}
+        buses={buses}
+        routes={routes}
         faculties={facultyOptions}
+        isPlatform={isPlatform}
+        tenantId={tenantId}
+        colleges={colleges}
       />
 
       <ConfirmDialog

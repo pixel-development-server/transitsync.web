@@ -4,6 +4,7 @@ import { getDb } from '../db/connection.js';
 import { asyncHandler, validate, parsePagination, paginationMeta } from '../lib/http.js';
 import { badRequest, conflict, notFound } from '../lib/errors.js';
 import { PASSWORD_UNSET } from '../lib/password.js';
+import { operationalTenantScope, resolveOperationalTenant, assertCampusRowVisible } from '../lib/tenantScope.js';
 import { ROLE_KEYS } from '../db/permissions.js';
 import { requirePermission } from '../middleware/requirePermission.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -22,12 +23,8 @@ router.use(requireAuth);
 
 const SELECT_STUDENT = `
   SELECT s.*,
-         r.code AS route_code, r.name AS route_name, r.color AS route_color, r.shift AS route_shift,
-         b.code AS bus_code, b.name AS bus_name, b.seat_capacity AS bus_capacity,
          ob.code AS onboard_bus_code
     FROM students s
-    LEFT JOIN routes r  ON r.id = s.route_id
-    LEFT JOIN buses b   ON b.id = s.bus_id
     LEFT JOIN buses ob  ON ob.id = s.onboard_bus_id
 `;
 
@@ -46,14 +43,14 @@ function shape(row) {
     cardIssuedAt: row.card_issued_at,
     cardRevokedAt: row.card_revoked_at,
     cardRevokedReason: row.card_revoked_reason,
-    routeId: row.route_id,
-    routeCode: row.route_code,
-    routeName: row.route_name,
-    routeColor: row.route_color,
-    busId: row.bus_id,
-    busCode: row.bus_code,
-    busName: row.bus_name,
-    pickupStop: row.pickup_stop,
+    routeId: null,
+    routeCode: null,
+    routeName: null,
+    routeColor: null,
+    busId: null,
+    busCode: null,
+    busName: null,
+    pickupStop: null,
     status: row.status,
     onboard: Boolean(row.onboard_bus_id),
     onboardBusId: row.onboard_bus_id,
@@ -76,9 +73,6 @@ function toColumns(body, { partial = false } = {}) {
     program: 'program',
     semester: 'semester',
     rfidSerial: 'rfid_serial',
-    routeId: 'route_id',
-    busId: 'bus_id',
-    pickupStop: 'pickup_stop',
     status: 'status',
     notes: 'notes',
   };
@@ -197,16 +191,25 @@ router.get(
       clauses.push('s.card_status = ?');
       params.push(cardStatus);
     }
-    if (busId) {
-      clauses.push('s.bus_id = ?');
-      params.push(busId);
-    }
-    if (routeId) {
-      clauses.push('s.route_id = ?');
-      params.push(routeId);
-    }
+
     if (onboard === 'true') clauses.push('s.onboard_bus_id IS NOT NULL');
     if (onboard === 'false') clauses.push('s.onboard_bus_id IS NULL');
+
+    // Campus isolation: campus staff see their own campus, platform principals
+    // only what they explicitly drill into via `tenantId`.
+    const isSuperAdmin = Number(req.user?.role_level ?? req.user?.roleLevel ?? 0) >= 200;
+    const tenantIdQuery =
+      req.query?.tenantId ?? req.query?.tenant_id ?? req.query?.tenantID ?? null;
+    if (isSuperAdmin && !tenantIdQuery) {
+      res.json({
+        success: true,
+        data: { students: [], meta: paginationMeta({ total: 0, limit, page }) },
+      });
+      return;
+    }
+    const scope = operationalTenantScope(db, req.user, req.query, 's');
+    clauses.push(scope.clause);
+    params.push(...scope.params);
 
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const orderMap = {
@@ -240,6 +243,29 @@ router.get(
   requirePermission('students:read'),
   asyncHandler(async (req, res) => {
     const db = getDb();
+    const isSuperAdmin = Number(req.user?.role_level ?? req.user?.roleLevel ?? 0) >= 200;
+    const tenantIdQuery =
+      req.query?.tenantId ?? req.query?.tenant_id ?? req.query?.tenantID ?? null;
+    if (isSuperAdmin && !tenantIdQuery) {
+      res.json({
+        success: true,
+        data: {
+          totals: {
+            total: 0,
+            active: 0,
+            onboard: 0,
+            unassigned: 0,
+            issued: 0,
+            active_cards: 0,
+            revoked: 0,
+            unallocated: 0,
+          },
+          byFaculty: [],
+        },
+      });
+      return;
+    }
+    const scope = operationalTenantScope(db, req.user, req.query);
     const totals = db
       .prepare(
         `SELECT
@@ -251,16 +277,16 @@ router.get(
            SUM(CASE WHEN card_status = 'ACTIVE' THEN 1 ELSE 0 END) AS active_cards,
            SUM(CASE WHEN card_status = 'REVOKED' THEN 1 ELSE 0 END) AS revoked,
            SUM(CASE WHEN bus_id IS NULL AND status = 'ACTIVE' THEN 1 ELSE 0 END) AS unallocated
-         FROM students`,
+         FROM students WHERE ${scope.clause}`,
       )
-      .get();
+      .get(...scope.params);
 
     const byFaculty = db
       .prepare(
         `SELECT COALESCE(faculty, 'Unassigned') AS faculty, COUNT(*) AS n
-           FROM students GROUP BY faculty ORDER BY n DESC LIMIT 12`,
+           FROM students WHERE ${scope.clause} GROUP BY faculty ORDER BY n DESC LIMIT 12`,
       )
-      .all();
+      .all(...scope.params);
 
     res.json({ success: true, data: { totals, byFaculty } });
   }),
@@ -272,12 +298,13 @@ router.get(
   requirePermission('students:read'),
   asyncHandler(async (req, res) => {
     const db = getDb();
+    const scope = operationalTenantScope(db, req.user, req.query);
     const rows = db
       .prepare(
         `SELECT id, full_name, college_id, rfid_serial, card_status, status, bus_id
-           FROM students ORDER BY id DESC LIMIT 25`,
+           FROM students WHERE ${scope.clause} ORDER BY id DESC LIMIT 25`,
       )
-      .all();
+      .all(...scope.params);
     res.json({ success: true, data: { cards: rows.map(shape) } });
   }),
 );
@@ -293,6 +320,7 @@ router.get(
     const db = getDb();
     const row = db.prepare(`${SELECT_STUDENT} WHERE s.id = ?`).get(Number(req.params.id));
     if (!row) throw notFound('Student');
+    assertCampusRowVisible(req.user, row, 'Student');
 
     const scans = db
       .prepare(
@@ -326,17 +354,14 @@ router.post(
       throw conflict(`RFID serial "${body.rfidSerial}" is already bound to another student.`);
     }
 
-    const { busId } = normaliseAllocation(db, body);
     const columns = toColumns(body);
-    // A supplied serial implies an active card; an explicit status always wins.
     const requestedCard = body.cardStatus ?? (columns.rfid_serial ? 'ACTIVE' : 'UNASSIGNED');
+    const tenant = resolveOperationalTenant(db, req.user, body);
     const finalColumns = {
       ...columns,
       ...cardColumns({ status: requestedCard, reason: body.cardRevokedReason ?? null }),
-      bus_id: columns.bus_id ?? busId ?? null,
+      tenant_id: tenant,
     };
-
-    assertBusCapacity(db, finalColumns.bus_id, { delta: 1 });
 
     const keys = Object.keys(finalColumns);
     const result = db
@@ -371,7 +396,7 @@ router.post(
                   is_first_login, password_changed, force_password_reset, permissions_mode)
                VALUES (?, ?, ?, 'invited', ?, ?, 1, 0, 0, 'INHERIT')`,
             )
-            .run(body.email, body.fullName, PASSWORD_UNSET, studentRole.id, req.user.tenant_id ?? null);
+            .run(body.email, body.fullName, PASSWORD_UNSET, studentRole.id, tenant);
           linkedUserId = Number(provisioned.lastInsertRowid);
           recordAudit(fromRequest(req, 'student.invite_sent', {
             entity: 'user',
@@ -380,7 +405,7 @@ router.post(
           }));
         }
         db.prepare(
-          "UPDATE students SET user_id = ?, is_claimed = 1, updated_at = datetime('now') WHERE id = ?",
+          "UPDATE students SET user_id = ?, updated_at = datetime('now') WHERE id = ?",
         ).run(linkedUserId, studentId);
       }
     }
@@ -403,14 +428,9 @@ router.patch(
     const id = Number(req.params.id);
     const existing = db.prepare('SELECT * FROM students WHERE id = ?').get(id);
     if (!existing) throw notFound('Student');
+    assertCampusRowVisible(req.user, existing, 'Student');
 
     const body = { ...req.body };
-    if (body.clearBus) {
-      body.busId = null;
-      body.routeId = body.routeId ?? null;
-    }
-    if (body.clearRoute) body.routeId = null;
-
     if (body.rfidSerial && body.rfidSerial !== existing.rfid_serial) {
       const clash = db.prepare('SELECT id FROM students WHERE UPPER(rfid_serial) = ? AND id <> ?').get(body.rfidSerial, id);
       if (clash) throw conflict(`RFID serial "${body.rfidSerial}" is already bound to another student.`);
@@ -418,13 +438,6 @@ router.patch(
     if (body.collegeId && body.collegeId !== existing.college_id) {
       const clash = db.prepare('SELECT id FROM students WHERE college_id = ? AND id <> ?').get(body.collegeId, id);
       if (clash) throw conflict(`College ID "${body.collegeId}" is already registered.`);
-    }
-
-    const { busId } = normaliseAllocation(db, body, { partial: true });
-    if (busId !== undefined) body.busId = busId;
-    const targetBusId = body.busId !== undefined ? body.busId : existing.bus_id;
-    if (targetBusId && targetBusId !== existing.bus_id) {
-      assertBusCapacity(db, targetBusId, { excludeStudentId: id, delta: 1 });
     }
 
     const columns = toColumns(body, { partial: true });
@@ -472,6 +485,7 @@ router.post(
     const id = Number(req.params.id);
     const existing = db.prepare('SELECT * FROM students WHERE id = ?').get(id);
     if (!existing) throw notFound('Student');
+    assertCampusRowVisible(req.user, existing, 'Student');
 
     const serial = req.body.rfidSerial.toUpperCase();
     const clash = db
@@ -505,6 +519,7 @@ router.post(
     const id = Number(req.params.id);
     const existing = db.prepare('SELECT * FROM students WHERE id = ?').get(id);
     if (!existing) throw notFound('Student');
+    assertCampusRowVisible(req.user, existing, 'Student');
     if (!existing.rfid_serial) throw badRequest('This student does not hold a card.');
 
     const row = applyCardState(db, id, existing, { status: 'REVOKED', reason: req.body.reason ?? 'cancelled' });
@@ -525,6 +540,7 @@ router.delete(
     const id = Number(req.params.id);
     const existing = db.prepare('SELECT * FROM students WHERE id = ?').get(id);
     if (!existing) throw notFound('Student');
+    assertCampusRowVisible(req.user, existing, 'Student');
 
     const card = cardColumns({ status: 'REVOKED', reason: 'withdrawn', existing });
     const assignments = Object.keys(card).map((key) => `${key} = ?`).join(', ');
@@ -549,6 +565,7 @@ router.delete(
     const id = Number(req.params.id);
     const existing = db.prepare('SELECT * FROM students WHERE id = ?').get(id);
     if (!existing) throw notFound('Student');
+    assertCampusRowVisible(req.user, existing, 'Student');
 
     db.prepare('DELETE FROM students WHERE id = ?').run(id);
     recordAudit(fromRequest(req, 'student.purge', { entity: 'student', entityId: id, detail: { collegeId: existing.college_id } }));

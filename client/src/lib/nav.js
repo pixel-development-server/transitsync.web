@@ -32,6 +32,7 @@ export const NAV_SECTIONS = [
     label: 'Administration',
     items: [
       { to: '/users', label: 'Users', icon: 'users', permission: 'users:read' },
+      { to: '/admin/student-users', label: 'Student Accounts', icon: 'students', permission: 'users:read' },
       { to: '/roles', label: 'Roles & Permissions', icon: 'roles', permission: 'roles:read' },
       { to: '/settings', label: 'Settings', icon: 'settings', permission: 'settings:read' },
     ],

@@ -114,7 +114,7 @@ router.get(
       ? db
           .prepare(
             `SELECT id, code, name, description, start_point, end_point, shift,
-                    departure_time, arrival_time, color, is_active
+                    departure_time, arrival_time, color, is_active, tenant_id
                FROM routes WHERE id = ?`,
           )
           .get(student.route_id)
@@ -130,15 +130,13 @@ router.get(
 
     // Prefer the explicitly assigned bus; otherwise fall back to whichever bus is
     // currently running the rider's route.
-    const bus =
-      (student.bus_id ? db.prepare('SELECT * FROM buses WHERE id = ?').get(student.bus_id) : null) ??
-      (route
-        ? db
-            .prepare(
-              "SELECT * FROM buses WHERE current_route_id = ? AND status = 'active' ORDER BY id LIMIT 1",
-            )
-            .get(route.id)
-        : null);
+    const bus = route
+      ? db
+          .prepare(
+            "SELECT * FROM buses WHERE current_route_id = ? AND status = 'ACTIVE' ORDER BY id LIMIT 1",
+          )
+          .get(route.id)
+      : null;
 
     const pass =
       student.bus_pass_no || student.card_status
@@ -164,7 +162,7 @@ router.get(
           program: student.program ?? null,
           semester: student.semester ?? null,
           status: student.status,
-          pickupStop: student.pickup_stop ?? null,
+          pickupStop: null,
         },
         college: student.tenant_id
           ? { name: student.college_name ?? null, code: student.college_code ?? null }

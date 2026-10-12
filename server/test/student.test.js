@@ -22,10 +22,10 @@ function addRosterStudent({ email, name = 'Rider Test', status = 'ACTIVE', claim
   const result = db
     .prepare(
       `INSERT INTO students
-         (full_name, college_id, email, rfid_status, card_status, status, tenant_id, is_claimed)
-       VALUES (?, ?, ?, 'ACTIVE', 'ACTIVE', ?, ?, ?)`,
+         (full_name, college_id, email, rfid_status, card_status, status, tenant_id, created_at, updated_at)
+       VALUES (?, ?, ?, 'ACTIVE', 'ACTIVE', ?, ?, datetime('now'), datetime('now'))`,
     )
-    .run(name, `TST${Math.floor(Math.random() * 1_000_000)}`, email, status, TENANT, claimed);
+    .run(name, `TST${Math.floor(Math.random() * 1_000_000)}`, email, status, TENANT);
   return Number(result.lastInsertRowid);
 }
 
@@ -73,10 +73,9 @@ test('claiming a roster row creates a level-1 student account and links it', asy
   riderToken = response.body.data.token;
 
   const row = db
-    .prepare('SELECT user_id, is_claimed FROM students WHERE email = ?')
+    .prepare('SELECT user_id FROM students WHERE email = ?')
     .get('rider.one@kmi.edu.np');
   assert.ok(row.user_id, 'the roster row should link to its new user');
-  assert.equal(row.is_claimed, 1);
 });
 
 test('a claimed roster email switches to the password path', async () => {

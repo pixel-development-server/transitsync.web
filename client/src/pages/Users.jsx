@@ -29,6 +29,7 @@ import { copyText, useApi, useDebounced, usePagination } from '../lib/hooks.js';
 import { useToast } from '../lib/toast.jsx';
 import { formatDateTime, formatRelative, initials, titleCase } from '../lib/format.js';
 import { modulePermissionKeys } from '../lib/permissions.js';
+import { CampusSelect, useCampusDirectory, usePlatformScope } from '../components/CampusScope.jsx';
 
 const EMPTY_USER = {
   email: '',
@@ -41,6 +42,7 @@ const EMPTY_USER = {
   permissionsMode: 'INHERIT',
   permissions: [],
   forcePasswordChange: true,
+  tenantId: '',
 };
 
 /**
@@ -223,8 +225,11 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles, currentUse
   const assignableRoles = useMemo(() => {
     const list = roles?.roles ?? [];
     const level = Number(currentUser?.roleLevel ?? 200);
+    if (level >= 200) return list;
     return list.filter((role) => Number(role.level) < level);
   }, [roles, currentUser]);
+
+  const isPlatformActor = Number(currentUser?.roleLevel ?? 0) >= 200;
 
   useEffect(() => {
     if (!open) return;
@@ -239,10 +244,11 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles, currentUse
             jobTitle: user.jobTitle ?? '',
             department: user.department ?? '',
             phone: user.phone ?? '',
+            tenantId: user.tenantId ?? '',
           }
-        : { ...EMPTY_USER, roleId: String(assignableRoles[0]?.id ?? '') },
+        : { ...EMPTY_USER, roleId: String(assignableRoles[0]?.id ?? ''), tenantId: '' },
     );
-  }, [open, user, roles, assignableRoles]);
+  }, [open, user, roles, assignableRoles, currentUser]);
 
   const set = useCallback(
     (key) => (event) => {
@@ -290,7 +296,7 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles, currentUse
         });
         toast.success(`${form.fullName} updated.`);
       } else {
-        const response = await api.post('/users', {
+        const payload = {
           email,
           fullName: form.fullName.trim(),
           roleId: Number(form.roleId),
@@ -300,7 +306,17 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles, currentUse
           temporaryPassword: form.temporaryPassword.trim() || undefined,
           permissionsMode: 'INHERIT',
           forcePasswordChange: true,
-        });
+        };
+        if (isPlatformActor) {
+          const role = roles?.roles?.find((r) => String(r.id) === String(form.roleId));
+          const isPlatformRole = Number(role.level) >= 200;
+          if (isPlatformRole) {
+            // Platform Super Administrator is not bound to a campus tenant.
+          } else if (form.tenantId) {
+            payload.tenantId = form.tenantId;
+          }
+        }
+        const response = await api.post('/users', payload);
         // Either a one-time temporary password comes back (hand it to the
         // parent so it can be shown before it is gone forever), or the account
         // was created passwordless and its owner sets one at first sign-in.
@@ -371,6 +387,26 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles, currentUse
             required
             disabled={saving}
           />
+          {isPlatformActor && !user ? (() => {
+            const selectedRole = roles?.roles?.find((r) => String(r.id) === String(form.roleId));
+            const isPlatformRole = selectedRole ? Number(selectedRole.level) >= 200 : false;
+            if (isPlatformRole) return null;
+            return (
+              <Select
+                label="Campus"
+                value={form.tenantId}
+                onChange={set('tenantId')}
+                error={fieldErrors.tenantId}
+                options={colleges.map((college) => ({
+                  value: college.id,
+                  label: college.name,
+                }))}
+                placeholder="Select a campus"
+                required
+                disabled={saving}
+              />
+            );
+          })() : null}
           <Input label="Job title" value={form.jobTitle} onChange={set('jobTitle')} error={fieldErrors.jobTitle} disabled={saving} />
           <Input label="Department" value={form.department} onChange={set('department')} error={fieldErrors.department} disabled={saving} />
           <Input label="Phone" value={form.phone} onChange={set('phone')} error={fieldErrors.phone} disabled={saving} />
@@ -601,6 +637,16 @@ export default function Users() {
       ),
     },
     {
+      key: 'campus',
+      label: 'Campus',
+      render: (row) =>
+        Number(row.roleLevel ?? 0) >= 200 ? (
+          <Badge tone="accent">Platform</Badge>
+        ) : (
+          <span className="text-[0.76rem] text-mist-300">{row.institutionName ?? '—'}</span>
+        ),
+    },
+    {
       key: 'sessions',
       label: 'Sessions',
       align: 'center',
@@ -777,6 +823,8 @@ export default function Users() {
         user={editing}
         roles={roles}
         currentUser={currentUser}
+        colleges={colleges}
+        isPlatformActor={isPlatform}
       />
 
       <CredentialDialog credential={issued} onClose={() => setIssued(null)} />

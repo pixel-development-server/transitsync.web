@@ -56,14 +56,20 @@ function assertRankAbove(actor, target, action = 'modify') {
 }
 
 /**
- * A role can only be granted when it sits strictly below the actor's level.
- * This is what keeps the System Administrator role (100) immutable and stops
- * every other level from handing it out.
+ * A role can only be granted when it sits strictly below the actor's level —
+ * EXCEPT one case: the platform owner (Level 200) may provision a peer
+ * Super Administrator (also Level 200), so the platform can hand its own
+ * ownership to a successor. System Administrator (100) and every other role
+ * remain un-mintable at or above the caller's seniority.
  */
 function assertAssignableRole(actor, role, action = 'assign') {
-  if (Number(actor.role_level) <= Number(role.level)) {
+  const actorLevel = Number(actor.role_level);
+  const roleLevel = Number(role.level);
+  const peerSuperAdmin =
+    actorLevel >= SUPER_ADMIN_LEVEL && roleLevel === SUPER_ADMIN_LEVEL && role.key === ROLE_KEYS.SUPER_ADMIN;
+  if (!peerSuperAdmin && actorLevel <= roleLevel) {
     throw forbidden(
-      `You cannot ${action} the "${role.name}" role (level ${role.level}) at or above your own level (${actor.role_level}).`,
+      `You cannot ${action} the "${role.name}" role (level ${roleLevel}) at or above your own level (${actorLevel}).`,
       { code: 'LEVEL_LOCKED' },
     );
   }
@@ -143,13 +149,15 @@ router.get(
       .prepare(
         `SELECT u.id, u.email, u.full_name, u.phone, u.department, u.job_title, u.status,
                 u.is_first_login, u.password_changed, u.force_password_reset,
-                u.permissions_mode, u.last_login_at, u.created_at,
+                u.permissions_mode, u.last_login_at, u.created_at, u.tenant_id,
                 r.key AS role_key, r.name AS role_name, r.level AS role_level,
+                inst.name AS institution_name,
                 (SELECT COUNT(*) FROM login_sessions ls
                   WHERE ls.user_id = u.id AND ls.revoked_at IS NULL
                     AND ls.expires_at > datetime('now')) AS active_sessions
            FROM users u
            LEFT JOIN roles r ON r.id = u.role_id
+           LEFT JOIN institutions inst ON inst.id = u.tenant_id
            ${where}
           ORDER BY ${orderBy} ASC, u.id ASC
           LIMIT ? OFFSET ?`,
@@ -157,7 +165,12 @@ router.get(
       .all(...params, limit, offset);
 
     const total = db
-      .prepare(`SELECT COUNT(*) AS n FROM users u LEFT JOIN roles r ON r.id = u.role_id ${where}`)
+      .prepare(
+        `SELECT COUNT(*) AS n FROM users u
+           LEFT JOIN roles r ON r.id = u.role_id
+           LEFT JOIN institutions inst ON inst.id = u.tenant_id
+           ${where}`,
+      )
       .get(...params).n;
 
     const overridesByUser = new Map();
@@ -319,14 +332,41 @@ router.post(
     const passwordChanged = issuedPassword ? (forcePasswordChange ? 0 : 1) : 0;
     const forceReset = issuedPassword ? (forcePasswordChange ? 1 : 0) : 0;
 
-    // Campus principals always place accounts in their own campus. A platform
-    // principal may pass an explicit tenant, defaulting to platform-global.
-    if (tenantId && !db.prepare('SELECT id FROM institutions WHERE id = ?').get(tenantId)) {
-      throw unprocessable('Unknown college tenant.', [
-        { field: 'tenantId', message: 'Pick a valid campus tenant.' },
-      ]);
+    // Campus isolation on writes. The tenant an account lands in is decided by
+    // the server, never the caller:
+    //   - a platform Super Administrator account is ALWAYS platform-global
+    //     (`tenant_id` NULL) and refuses a campus binding;
+    //   - a platform principal creating a campus account must name the campus
+    //     (their own tenant is NULL, so there is nothing to inherit);
+    //   - a campus principal always lands in their own campus — a client-supplied
+    //     `tenantId` is ignored so a campus admin can never place an account in
+    //     another college.
+    const isPlatformRole = role.key === ROLE_KEYS.SUPER_ADMIN;
+    const actorIsPlatform = Number(req.user.role_level) >= SUPER_ADMIN_LEVEL;
+
+    let tenant = null;
+    if (isPlatformRole) {
+      if (tenantId) {
+        throw unprocessable('A platform Super Administrator is not bound to a campus tenant.', [
+          { field: 'tenantId', message: 'The Super Administrator role is platform-wide; leave the campus unset.' },
+        ]);
+      }
+      tenant = null;
+    } else if (actorIsPlatform) {
+      if (!tenantId) {
+        throw unprocessable('Choose the campus this account belongs to.', [
+          { field: 'tenantId', message: 'Campus staff accounts must be bound to a college.' },
+        ]);
+      }
+      if (!db.prepare('SELECT id FROM institutions WHERE id = ?').get(tenantId)) {
+        throw unprocessable('Unknown college tenant.', [
+          { field: 'tenantId', message: 'Pick a valid campus tenant.' },
+        ]);
+      }
+      tenant = tenantId;
+    } else {
+      tenant = req.user.tenant_id ?? null;
     }
-    const tenant = tenantId ?? req.user.tenant_id ?? null;
 
     const userId = db.transaction(() => {
       const result = db
@@ -396,6 +436,9 @@ router.patch(
 
     const { fullName, roleId, status, jobTitle, department, phone } = req.body;
     const isSelf = id === Number(req.user.id);
+    // Flattened out of the `if (roleId)` block so the transaction below can
+    // reference it without tripping block scoping.
+    let grantingSuperAdmin = false;
 
     // Seniority rule: you may edit staff strictly below your own level, never a
     // System Administrator or a peer at your level. Self-edits pass this guard.
@@ -408,6 +451,8 @@ router.patch(
     if (roleId) {
       const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(roleId);
       if (!role) throw unprocessable('Unknown role.', [{ field: 'roleId', message: 'Pick a valid role.' }]);
+
+      grantingSuperAdmin = role.key === ROLE_KEYS.SUPER_ADMIN;
 
       if (target.role_key === ROLE_KEYS.SYSTEM_ADMIN && role.key !== ROLE_KEYS.SYSTEM_ADMIN) {
         const remaining = db
@@ -448,6 +493,11 @@ router.patch(
       if (roleId && roleId !== target.role_id) {
         db.prepare('UPDATE users SET token_version = token_version + 1 WHERE id = ?').run(id);
         db.prepare("UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = 'role_changed' WHERE user_id = ? AND revoked_at IS NULL").run(id);
+      }
+      // A Super Administrator is a platform-scope account: promoting one always
+      // detaches it from any campus tenant it used to belong to.
+      if (grantingSuperAdmin && roleId !== target.role_id) {
+        db.prepare('UPDATE users SET tenant_id = NULL WHERE id = ?').run(id);
       }
     });
 

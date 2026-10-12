@@ -140,14 +140,20 @@ export default function Layout() {
   const openAlerts = alertStats?.open ?? null;
 
   const roleLevel = Number(user?.roleLevel ?? 0);
+  const isSuperAdmin = roleLevel >= 200 || user?.role === 'super_admin';
 
   const visibleSections = useMemo(
     () =>
       NAV_SECTIONS.map((section) => ({
         ...section,
         items: section.items.filter((item) => canSeeNavItem(item, { can, roleLevel })),
-      })).filter((section) => section.items.length > 0),
-    [can, roleLevel],
+      }))
+        .filter((section) => {
+          if (isSuperAdmin && section.label === 'Records') return false;
+          if (isSuperAdmin && section.label === 'Fleet') return false;
+          return section.items.length > 0;
+        }),
+    [can, roleLevel, isSuperAdmin],
   );
 
   const handleSignOut = async () => {

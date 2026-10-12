@@ -228,8 +228,8 @@ export function seedDemo(db) {
     const insertStudent = db.prepare(
       `INSERT INTO students (full_name, college_id, email, phone, faculty, program, semester,
                              rfid_serial, rfid_status, card_status, card_issued_at,
-                             route_id, bus_id, pickup_stop, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             card_revoked_at, card_revoked_reason, status, tenant_id, updated_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
     );
 
     const studentIds = [];
@@ -241,11 +241,9 @@ export function seedDemo(db) {
       const last = pick(LAST, Math.floor(index / FIRST.length));
       const name = `${first} ${last}`;
       const faculty = pick(FACULTY, index);
-      const bus = pick(activeBuses, Math.floor(random() * activeBuses.length));
       const collegeId = `KMI${String(2024000 + index).slice(-7)}`;
       const serial = randomSerial(index);
 
-      // Deliberately inject a few edge cases so the simulator has real material.
       const roll = random();
       let status = 'ACTIVE';
       let rfidStatus = 'ACTIVE';
@@ -254,7 +252,6 @@ export function seedDemo(db) {
       else if (roll > 0.93) rfidStatus = 'BLOCKED';
       else if (roll > 0.90) rfidStatus = 'LOST';
 
-      // A blocked/lost card is revoked; everything else is in good standing.
       const cardStatus = rfidStatus === 'BLOCKED' || rfidStatus === 'LOST' ? 'REVOKED' : 'ACTIVE';
       const issuedAt = new Date(today.getTime() - (30 + index) * 86400000)
         .toISOString()
@@ -273,18 +270,12 @@ export function seedDemo(db) {
         rfidStatus,
         cardStatus,
         issuedAt,
-        bus.route ? routeIds[bus.route] : null,
-        bus.id,
-        `${bus.name} gate`,
+        null,
+        null,
         status,
+        null,
       );
-      studentIds.push({ id: Number(result.lastInsertRowid), serial, busId: bus.id, name, status, cardStatus });
-    }
-
-    // A handful with no bus allocation so "Unauthorized Route" is reachable.
-    for (const index of [3, 11, 19]) {
-      const student = studentIds[index];
-      db.prepare('UPDATE students SET bus_id = NULL, route_id = NULL WHERE id = ?').run(student.id);
+      studentIds.push({ id: Number(result.lastInsertRowid), serial, name, status, cardStatus });
     }
 
     // ---- guaranteed edge cases -------------------------------------------
@@ -312,17 +303,20 @@ export function seedDemo(db) {
     // are non-zero on the dashboard rather than a flat zero.
     const activeBusStudents = db
       .prepare(
-        `SELECT id, bus_id FROM students
-          WHERE bus_id IS NOT NULL AND status = 'ACTIVE' AND card_status = 'ACTIVE'
+        `SELECT id FROM students
+          WHERE status = 'ACTIVE' AND card_status = 'ACTIVE'
           ORDER BY id LIMIT 9`,
       )
       .all();
 
     for (const [index, student] of activeBusStudents.entries()) {
       if (index % 3 === 2) continue; // leave a third of them waiting at the stop
-      db.prepare(
-        "UPDATE students SET onboard_bus_id = ?, onboard_at = datetime('now', ?) WHERE id = ?",
-      ).run(student.bus_id, `-${(index % 4) * 7 + 3} minutes`, student.id);
+      const bus = activeBuses[index % activeBuses.length];
+      if (bus) {
+        db.prepare(
+          "UPDATE students SET onboard_bus_id = ?, onboard_at = datetime('now', ?) WHERE id = ?",
+        ).run(bus.id, `-${(index % 4) * 7 + 3} minutes`, student.id);
+      }
     }
 
     // ---- staff accounts ---------------------------------------------------
