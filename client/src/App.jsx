@@ -120,7 +120,7 @@ function PermissionGate({ permission, children }) {
 function SuperAdminGate({ children }) {
   const { user } = useAuth();
 
-  if (Number(user?.roleLevel ?? 0) < 200) {
+  if (Number(user?.roleLevel ?? user?.level ?? 0) < 200) {
     return (
       <EmptyState
         icon="lock"
@@ -255,7 +255,7 @@ function AppRoutes() {
               path="students"
               element={
                 <PermissionGate permission="students:read">
-                  {Number(user?.roleLevel ?? 0) >= 200 || user?.role === 'super_admin' ? (
+                  {Number(user?.roleLevel ?? user?.level ?? 0) >= 200 || user?.role === 'super_admin' ? (
                     <Navigate to="/admin/colleges" replace />
                   ) : (
                     <Students />
@@ -267,7 +267,7 @@ function AppRoutes() {
               path="students/:id"
               element={
                 <PermissionGate permission="students:read">
-                  {Number(user?.roleLevel ?? 0) >= 200 || user?.role === 'super_admin' ? (
+                  {Number(user?.roleLevel ?? user?.level ?? 0) >= 200 || user?.role === 'super_admin' ? (
                     <Navigate to="/admin/colleges" replace />
                   ) : (
                     <StudentDetail />
@@ -287,7 +287,7 @@ function AppRoutes() {
               path="fleet"
               element={
                 <PermissionGate permission="fleet:read">
-                  {Number(user?.roleLevel ?? 0) >= 200 || user?.role === 'super_admin' ? (
+                  {Number(user?.roleLevel ?? user?.level ?? 0) >= 200 || user?.role === 'super_admin' ? (
                     <Navigate to="/admin/colleges" replace />
                   ) : (
                     <Fleet />
@@ -378,5 +378,6 @@ export default function App() {
 
 /** Shared icon re-export so pages import from one place. */
 export { Icon };
+
 
 
