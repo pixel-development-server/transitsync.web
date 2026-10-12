@@ -70,7 +70,7 @@ export default function StudentManagement() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await get('/admin/student-users', query);
+      const res = await get('/admin/student-accounts', query);
       if (res?.success) {
         setData({ users: res.data.users, meta: res.data.meta });
       }
@@ -89,7 +89,7 @@ export default function StudentManagement() {
     if (!can('users:edit')) return;
     setBusy(`reset-${user?.id}`);
     try {
-      const res = await post(`/admin/student-users/${user?.id}/reset-password`);
+      const res = await post(`/admin/student-accounts/${user?.id}/reset-password`);
       if (res?.success) {
         push({
           title: 'Password reset',
@@ -109,7 +109,7 @@ export default function StudentManagement() {
     if (!can('users:delete')) return;
     setBusy(`delete-${confirm.id}`);
     try {
-      await del(`/admin/student-users/${confirm.id}`);
+      await del(`/admin/student-accounts/${confirm.id}`);
       push({ title: 'Student account removed', tone: 'success' });
       setConfirm(null);
       load();
