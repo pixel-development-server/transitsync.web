@@ -218,6 +218,9 @@ function Shell() {
 }
 
 function AppRoutes() {
+  const { user } = useAuth() || {};
+  const isSuperAdmin = Number(user?.roleLevel ?? user?.level ?? 0) >= 200 || user?.role === 'super_admin';
+
   return (
     <Routes>
       <Route path="/system-setup" element={<Setup />} />
@@ -255,7 +258,7 @@ function AppRoutes() {
               path="students"
               element={
                 <PermissionGate permission="students:read">
-                  {Number(user?.roleLevel ?? user?.level ?? 0) >= 200 || user?.role === 'super_admin' ? (
+                  {isSuperAdmin ? (
                     <Navigate to="/admin/colleges" replace />
                   ) : (
                     <Students />
@@ -267,7 +270,7 @@ function AppRoutes() {
               path="students/:id"
               element={
                 <PermissionGate permission="students:read">
-                  {Number(user?.roleLevel ?? user?.level ?? 0) >= 200 || user?.role === 'super_admin' ? (
+                  {isSuperAdmin ? (
                     <Navigate to="/admin/colleges" replace />
                   ) : (
                     <StudentDetail />
@@ -287,7 +290,7 @@ function AppRoutes() {
               path="fleet"
               element={
                 <PermissionGate permission="fleet:read">
-                  {Number(user?.roleLevel ?? user?.level ?? 0) >= 200 || user?.role === 'super_admin' ? (
+                  {isSuperAdmin ? (
                     <Navigate to="/admin/colleges" replace />
                   ) : (
                     <Fleet />

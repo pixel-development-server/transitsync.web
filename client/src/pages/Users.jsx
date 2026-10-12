@@ -29,7 +29,7 @@ import { copyText, useApi, useDebounced, usePagination } from '../lib/hooks.js';
 import { useToast } from '../lib/toast.jsx';
 import { formatDateTime, formatRelative, initials, titleCase } from '../lib/format.js';
 import { modulePermissionKeys } from '../lib/permissions.js';
-import { CampusSelect, useCampusDirectory, usePlatformScope } from '../components/CampusScope.jsx';
+import { useCampusDirectory } from '../components/CampusScope.jsx';
 
 const EMPTY_USER = {
   email: '',
@@ -213,7 +213,7 @@ function PermissionsDialog({ open, onClose, onSaved, user, roles, permissionMatr
   );
 }
 
-function UserDialog({ open, onClose, onSaved, onCreated, user, roles, currentUser }) {
+function UserDialog({ open, onClose, onSaved, onCreated, user, roles, currentUser, colleges = [] }) {
   const toast = useToast();
   const [form, setForm] = useState(EMPTY_USER);
   const [error, setError] = useState(null);
@@ -498,6 +498,8 @@ export default function Users() {
   const { can, user: currentUser } = useAuth();
   const toast = useToast();
   const { page, limit, goToPage, changeLimit, reset } = usePagination({ defaultLimit: 25 });
+  // Campus directory for the platform principal's "Campus" picker in UserDialog.
+  const { isPlatform, colleges } = useCampusDirectory();
 
   const [search, setSearch] = useState('');
   const [role, setRole] = useState('');
