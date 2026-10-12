@@ -20,7 +20,7 @@ import {
   useLocation,
 } from 'react-router-dom';
 
-import Layout from './components/Layout.jsx';
+import Layout from './components/Layout.jsx';import ErrorBoundary from './components/ErrorBoundary.jsx';
 import { Icon } from './components/Icon.jsx';
 import SessionTimeout from './components/SessionTimeout.jsx';
 import { EmptyState, Spinner } from './components/ui.jsx';
@@ -368,7 +368,7 @@ export default function App() {
           <SessionTimeout />
           <DocumentTitle />
           <SetupGate>
-            <AppRoutes />
+            <ErrorBoundary><AppRoutes /></ErrorBoundary>
           </SetupGate>
         </AuthProvider>
       </ToastProvider>
@@ -378,3 +378,5 @@ export default function App() {
 
 /** Shared icon re-export so pages import from one place. */
 export { Icon };
+
+
