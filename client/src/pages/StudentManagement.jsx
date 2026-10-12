@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
 import { Icon } from '../components/Icon.jsx';
-import CampusScope from '../components/CampusScope.jsx';
+import { CampusSelect, useCampusDirectory, usePlatformScope } from '../components/CampusScope.jsx';
 import { EmptyState, Spinner, DataTable, Button } from '../components/ui.jsx';
 
 function Input({ className = '', ...props }) {
@@ -46,6 +46,8 @@ export default function StudentManagement() {
   const [searchParams, setSearchParams] = useSearchParams();
   const search = searchParams.get('search') ?? '';
   const status = searchParams.get('status') ?? 'all';
+  const { isPlatform } = usePlatformScope();
+  const { colleges } = useCampusDirectory(isPlatform);
 
   const { can, user } = useAuth();
   const { get, post, del } = useApi();
@@ -163,9 +165,12 @@ export default function StudentManagement() {
         </div>
       </header>
 
-      <CampusScope
+      <CampusSelect
+        isPlatform={isPlatform}
+        colleges={colleges}
         value={searchParams.get('tenantId')}
         onChange={(tenantId) => updateParam('tenantId', tenantId)}
+        wrapperClass="w-60"
       />
 
       <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-sm">
