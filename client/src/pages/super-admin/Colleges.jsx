@@ -126,7 +126,7 @@ function CredentialsModal({ result, onClose }) {
 
   const { college, credentials } = result;
   const lines = [
-    `TransitSync — ${college.name} (${college.code})`,
+    `TransitSync • ${college.name} (${college.code})`,
     `Sign in: ${window.location.origin}/login`,
     `Email: ${credentials.email}`,
     `Temporary password: ${credentials.temporaryPassword}`,

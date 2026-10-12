@@ -148,7 +148,7 @@ export function Checkbox({ label, hint, error, className = '', ...props }) {
           {hint ? <span className="block text-[0.7rem] text-mist-500">{hint}</span> : null}
         </span>
       </label>
-      {error ? <p className="mt-1 text-[0.7rem] font-medium text-red-400">{error}</p> : null}
+      {error ? <p className="mt-1 text-[0.7rem] font-medium text-red-400">{typeof error === 'string' ? error : error?.message || String(error)}</p> : null}
     </div>
   );
 }
