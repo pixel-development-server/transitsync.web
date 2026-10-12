@@ -58,7 +58,7 @@ function toUserShape(row) {
 }
 
 router.get(
-  '/student-users',
+  '/student-accounts',
   requirePermission('users:read'),
   asyncHandler(async (req, res) => {
     const db = getDb();

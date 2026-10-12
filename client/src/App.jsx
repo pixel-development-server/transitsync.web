@@ -305,7 +305,7 @@ function AppRoutes() {
               }
             />
             <Route
-              path="admin/student-users"
+              path="admin/student-accounts"
               element={
                 <PermissionGate permission="users:read">
                   <StudentManagement />
