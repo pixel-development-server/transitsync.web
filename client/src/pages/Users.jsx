@@ -73,8 +73,8 @@ function PermissionsDialog({ open, onClose, onSaved, user, roles, permissionMatr
   useEffect(() => {
     if (!open || !user) return;
     setError(null);
-    setMode(user.permissionsMode === 'CUSTOM' ? 'CUSTOM' : 'INHERIT');
-    setSelected(user.overrides?.length ? [...user.overrides] : [...(user.permissions ?? [])]);
+    setMode(user?.permissionsMode === 'CUSTOM' ? 'CUSTOM' : 'INHERIT');
+    setSelected(user?.overrides?.length ? [...user?.overrides] : [...(user?.permissions ?? [])]);
   }, [open, user]);
 
   const modules = permissionMatrix?.modules ?? EMPTY;
@@ -99,11 +99,11 @@ function PermissionsDialog({ open, onClose, onSaved, user, roles, permissionMatr
     setSaving(true);
     setError(null);
     try {
-      await api.put(`/users/${user.id}/permissions`, {
+      await api.put(`/users/${user?.id}/permissions`, {
         permissionsMode: mode,
         permissions: mode === 'CUSTOM' ? selected : [],
       });
-      toast.success(`Permissions updated for ${user.fullName}.`);
+      toast.success(`Permissions updated for ${user?.fullName}.`);
       onSaved();
       onClose();
     } catch (caught) {
@@ -238,13 +238,13 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles, currentUse
       user
         ? {
             ...EMPTY_USER,
-            email: user.email,
-            fullName: user.fullName,
-            roleId: String(roleIdFor(roles, user.role)),
-            jobTitle: user.jobTitle ?? '',
-            department: user.department ?? '',
-            phone: user.phone ?? '',
-            tenantId: user.tenantId ?? '',
+            email: user?.email,
+            fullName: user?.fullName,
+            roleId: String(roleIdFor(roles, user?.role)),
+            jobTitle: user?.jobTitle ?? '',
+            department: user?.department ?? '',
+            phone: user?.phone ?? '',
+            tenantId: user?.tenantId ?? '',
           }
         : { ...EMPTY_USER, roleId: String(assignableRoles[0]?.id ?? ''), tenantId: '' },
     );
@@ -287,7 +287,7 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles, currentUse
     setSaving(true);
     try {
       if (user) {
-        await api.patch(`/users/${user.id}`, {
+        await api.patch(`/users/${user?.id}`, {
           fullName: form.fullName.trim(),
           roleId: Number(form.roleId),
           jobTitle: form.jobTitle.trim() || null,
@@ -340,8 +340,8 @@ function UserDialog({ open, onClose, onSaved, onCreated, user, roles, currentUse
     <Modal
       open={open}
       onClose={onClose}
-      title={user ? `Edit ${user.fullName}` : 'Create a staff account'}
-      subtitle={user ? user.email : 'Name the account, pick a role and set a temporary password to hand over.'}
+      title={user ? `Edit ${user?.fullName}` : 'Create a staff account'}
+      subtitle={user ? user?.email : 'Name the account, pick a role and set a temporary password to hand over.'}
       footer={
         <>
           <button type="button" className="btn btn-ghost" onClick={onClose} disabled={saving}>

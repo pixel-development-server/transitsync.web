@@ -52,10 +52,10 @@ export default function Profile() {
   useEffect(() => {
     if (!user) return;
     setForm({
-      fullName: user.fullName ?? '',
-      phone: user.phone ?? '',
-      department: user.department ?? '',
-      jobTitle: user.jobTitle ?? '',
+      fullName: user?.fullName ?? '',
+      phone: user?.phone ?? '',
+      department: user?.department ?? '',
+      jobTitle: user?.jobTitle ?? '',
     });
   }, [user]);
 
@@ -204,14 +204,14 @@ export default function Profile() {
           <Panel title="Account" icon="user">
             <div className="mb-4 flex items-center gap-3">
               <span className="grid h-14 w-14 shrink-0 place-items-center rounded-full bg-gradient-to-br from-violet-500 to-sky-500 text-lg font-bold text-white">
-                {initials(user.fullName)}
+                {initials(user?.fullName)}
               </span>
               <div className="min-w-0">
-                <p className="truncate text-[0.95rem] font-bold text-mist-100">{user.fullName}</p>
-                <p className="truncate text-[0.76rem] text-mist-500">{user.email}</p>
+                <p className="truncate text-[0.95rem] font-bold text-mist-100">{user?.fullName}</p>
+                <p className="truncate text-[0.76rem] text-mist-500">{user?.email}</p>
                 <div className="mt-1 flex flex-wrap items-center gap-1">
-                  <Badge tone={user.roleLevel >= 100 ? 'accent' : 'info'}>{user.roleName ?? user.role}</Badge>
-                  <StatusBadge status={user.status} label={user.status} />
+                  <Badge tone={user?.roleLevel >= 100 ? 'accent' : 'info'}>{user?.roleName ?? user?.role}</Badge>
+                  <StatusBadge status={user?.status} label={user?.status} />
                 </div>
               </div>
             </div>
@@ -219,28 +219,28 @@ export default function Profile() {
             <dl className="space-y-2 text-[0.76rem]">
               <div className="flex justify-between gap-3">
                 <dt className="text-mist-500">Permissions</dt>
-                <dd className="tabular font-semibold text-mist-200">{user.permissions?.length ?? 0}</dd>
+                <dd className="tabular font-semibold text-mist-200">{user?.permissions?.length ?? 0}</dd>
               </div>
               <div className="flex justify-between gap-3">
                 <dt className="text-mist-500">Mode</dt>
                 <dd>
-                  <StatusBadge status={user.permissionsMode} label={user.permissionsMode} />
+                  <StatusBadge status={user?.permissionsMode} label={user?.permissionsMode} />
                 </dd>
               </div>
               <div className="flex justify-between gap-3">
                 <dt className="text-mist-500">Last sign-in</dt>
-                <dd className="text-mist-300">{formatRelative(user.lastLoginAt)}</dd>
+                <dd className="text-mist-300">{formatRelative(user?.lastLoginAt)}</dd>
               </div>
             </dl>
 
             <div className="mt-4 flex flex-wrap gap-1.5 border-t border-[var(--border-subtle)] pt-3.5">
-              {(user.permissions ?? []).slice(0, 12).map((permission) => (
+              {(user?.permissions ?? []).slice(0, 12).map((permission) => (
                 <Badge key={permission} tone="neutral">
                   {permission}
                 </Badge>
               ))}
-              {(user.permissions?.length ?? 0) > 12 ? (
-                <Badge tone="neutral">+{(user.permissions.length ?? 0) - 12} more</Badge>
+              {(user?.permissions?.length ?? 0) > 12 ? (
+                <Badge tone="neutral">+{(user?.permissions.length ?? 0) - 12} more</Badge>
               ) : null}
             </div>
           </Panel>
@@ -251,7 +251,7 @@ export default function Profile() {
                 <div className="min-w-0">
                   <p className="text-[0.8rem] font-semibold text-mist-200">Password</p>
                   <p className="text-[0.72rem] text-mist-500">
-                    {user.mustChangePassword ? 'A rotation is required now.' : 'Last rotated on schedule.'}
+                    {user?.mustChangePassword ? 'A rotation is required now.' : 'Last rotated on schedule.'}
                   </p>
                 </div>
                 <button
@@ -264,7 +264,7 @@ export default function Profile() {
                 </button>
               </li>
 
-              {user.mustChangePassword ? (
+              {user?.mustChangePassword ? (
                 <li>
                   <button
                     type="button"
@@ -327,7 +327,7 @@ export default function Profile() {
             </form>
           </Panel>
 
-          {user.roleLevel >= 200 ? <SecuritySettings /> : null}
+          {user?.roleLevel >= 200 ? <SecuritySettings /> : null}
 
           <Panel
             title="Active sessions"

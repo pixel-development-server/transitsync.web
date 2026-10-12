@@ -435,7 +435,7 @@ function SystemControlPanel() {
               <p className="mt-0.5 text-[0.72rem] leading-relaxed text-mist-500">
                 {user?.institutionName ? (
                   <>
-                    Put <span className="font-semibold text-mist-300">{user.institutionName}</span> into
+                    Put <span className="font-semibold text-mist-300">{user?.institutionName}</span> into
                     maintenance. Only that campus's users are blocked from sign-in and live sessions —
                     every other institution keeps working. You stay signed in so maintenance can be
                     turned back off.
@@ -750,3 +750,4 @@ export default function Settings() {
     </>
   );
 }
+

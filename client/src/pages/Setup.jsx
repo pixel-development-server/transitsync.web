@@ -149,7 +149,7 @@ export default function Setup() {
       });
 
       // Drop the session the server opened during setup so /login is a real
-      // sign-in. Best-effort: a failure here must not strand the user.
+      // sign-in. Best-effort: a failure here must not strand the user?.
       await signOut({ notifyServer: true });
 
       // Hand the chosen email over to the login screen, then hard-navigate.

@@ -90,7 +90,7 @@ export default function ChangePassword() {
           </p>
           {user?.email ? (
             <p className="mt-1 text-[0.75rem] text-mist-500">
-              Signed in as <span className="font-medium text-mist-300">{user.email}</span>
+              Signed in as <span className="font-medium text-mist-300">{user?.email}</span>
             </p>
           ) : null}
         </div>

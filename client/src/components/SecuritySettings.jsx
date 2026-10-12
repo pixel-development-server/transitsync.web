@@ -438,7 +438,7 @@ export default function SecuritySettings() {
 
           <div className="flex items-center gap-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--glass-fill)] px-3.5 py-2.5">
             <Icon name="mail" className="h-4 w-4 shrink-0 text-mist-500" />
-            <span className="truncate text-[0.82rem] font-semibold text-mist-200">{user.email}</span>
+            <span className="truncate text-[0.82rem] font-semibold text-mist-200">{user?.email}</span>
           </div>
 
           <Input
@@ -506,3 +506,4 @@ export default function SecuritySettings() {
     </>
   );
 }
+

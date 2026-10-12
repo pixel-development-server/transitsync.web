@@ -87,9 +87,9 @@ export default function StudentManagement() {
 
   const handleReset = async (user) => {
     if (!can('users:edit')) return;
-    setBusy(`reset-${user.id}`);
+    setBusy(`reset-${user?.id}`);
     try {
-      const res = await post(`/admin/student-users/${user.id}/reset-password`);
+      const res = await post(`/admin/student-users/${user?.id}/reset-password`);
       if (res?.success) {
         push({
           title: 'Password reset',
