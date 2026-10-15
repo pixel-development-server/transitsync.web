@@ -12,7 +12,7 @@ import { useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { Icon } from '../../components/Icon.jsx';
-import { Badge, EmptyState, ErrorState, OccupancyBar, PageHeader, Panel, Spinner, StatusBadge } from '../../components/ui.jsx';
+import { Badge, BrandMark, EmptyState, ErrorState, OccupancyBar, PageHeader, Panel, Spinner, StatusBadge } from '../../components/ui.jsx';
 import { useAuth } from '../../lib/auth.jsx';
 import { useApi } from '../../lib/hooks.js';
 import { formatDateTime } from '../../lib/format.js';
@@ -87,9 +87,7 @@ export default function StudentPortal() {
       <header className="relative z-10 border-b border-[var(--border-subtle)] bg-[var(--surface-raised)]/80 backdrop-blur">
         <div className="mx-auto flex max-w-4xl items-center justify-between gap-3 px-4 py-3">
           <div className="flex items-center gap-2.5">
-            <span className="grid h-9 w-9 place-items-center rounded-xl bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/25">
-              <Icon name="bus" className="h-5 w-5" />
-            </span>
+            <BrandMark size={36} rounded="rounded-xl" />
             <div className="leading-tight">
               <p className="text-[0.9rem] font-extrabold tracking-tight text-mist-100">TransitSync</p>
               <p className="text-[0.68rem] font-medium tracking-wide text-mist-500 uppercase">Rider portal</p>

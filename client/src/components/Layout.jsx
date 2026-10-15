@@ -11,7 +11,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 
 import { Icon } from './Icon.jsx';
 import ErrorBoundary from './ErrorBoundary.jsx';
-import { Badge, LiveIndicator } from './ui.jsx';
+import { Badge, BrandMark, LiveIndicator } from './ui.jsx';
 import { useAuth } from '../lib/auth.jsx';
 import { useApi } from '../lib/hooks.js';
 import { useEventStream } from '../lib/stream.js';
@@ -186,9 +186,7 @@ export default function Layout() {
             collapsed ? 'gap-2.5 px-4 lg:gap-1 lg:px-2' : 'gap-2.5 px-4'
           }`}
         >
-          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-brand-600 text-white shadow-lg shadow-brand-600/25">
-            <Icon name="bus" className="h-4.5 w-4.5" strokeWidth={2} />
-          </span>
+          <BrandMark size={32} className="shadow-sm" />
           <div className={`min-w-0 ${collapsed ? 'lg:hidden' : ''}`}>
             <p className="truncate text-[0.9rem] leading-tight font-extrabold tracking-tight text-mist-100">
               TransitSync

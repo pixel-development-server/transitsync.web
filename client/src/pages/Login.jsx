@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 
 import { Icon } from '../components/Icon.jsx';
-import { Spinner } from '../components/ui.jsx';
+import { BrandMark, Spinner } from '../components/ui.jsx';
 import { api } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
 import { useApi } from '../lib/hooks.js';
@@ -448,9 +448,7 @@ export default function Login() {
 
           {/* Top branding */}
           <div className="relative z-10 flex items-center gap-3">
-            <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-white/15 text-white ring-1 ring-white/25 backdrop-blur">
-              <Icon name="bus" className="h-6 w-6" strokeWidth={2} />
-            </span>
+            <BrandMark size={48} rounded="rounded-2xl" className="shadow-lg shadow-blue-950/30" />
             <div>
               <p className="text-xl font-extrabold tracking-tight text-white">TransitSync</p>
               <p className="text-[0.68rem] font-medium tracking-[0.14em] text-blue-100 uppercase">

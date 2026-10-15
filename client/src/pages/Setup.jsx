@@ -20,7 +20,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 
 import { Icon } from '../components/Icon.jsx';
-import { Spinner } from '../components/ui.jsx';
+import { BrandMark, Spinner } from '../components/ui.jsx';
 import { FormError, Input } from '../components/form.jsx';
 import { api } from '../lib/api.js';
 import { useApi } from '../lib/hooks.js';
@@ -188,9 +188,7 @@ export default function Setup() {
           {/* Header */}
           <div className="border-b border-[var(--border-subtle)] px-6 py-6 sm:px-8">
             <div className="flex items-start gap-4">
-              <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-sky-500 to-violet-500 text-white shadow-lg shadow-sky-500/25">
-                <Icon name="shield" className="h-6 w-6" strokeWidth={2} />
-              </span>
+              <BrandMark size={48} rounded="rounded-xl" className="shadow-lg shadow-sky-500/25" />
               <div>
                 <span className="chip">
                   <Icon name="zap" className="h-3 w-3" />

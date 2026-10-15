@@ -13,6 +13,38 @@ import { Icon } from './Icon.jsx';
 import { formatNumber } from '../lib/format.js';
 
 // ---------------------------------------------------------------------------
+// Brand
+// ---------------------------------------------------------------------------
+
+/**
+ * TransitSync brand mark.
+ *
+ * `busicon.png` is a fully-opaque 320x320 raster (a dark glyph on a solid white
+ * background) with no alpha channel, so it cannot be dropped transparently onto
+ * the dark navigation the way the old `bus` line-icon was. It is therefore
+ * framed as a white rounded "chip" with a hairline ring that keeps it legible on
+ * both the light surface and the dark sidebar, and `object-contain` preserves
+ * the artwork's proportions at any size.
+ *
+ * `size` drives both the intrinsic `width`/`height` (avoids layout shift before
+ * the image loads) and the rendered box; pass `className` for extra decoration.
+ */
+export function BrandMark({ size = 32, rounded = 'rounded-lg', className = '', alt = 'TransitSync logo' }) {
+  return (
+    <img
+      src="/busicon.png"
+      alt={alt}
+      width={size}
+      height={size}
+      decoding="async"
+      draggable={false}
+      style={{ width: size, height: size }}
+      className={`shrink-0 bg-white object-contain ring-1 ring-black/10 select-none dark:ring-white/20 ${rounded} ${className}`}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Status vocabulary
 // ---------------------------------------------------------------------------
 
