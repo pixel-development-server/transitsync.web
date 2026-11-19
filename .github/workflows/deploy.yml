@@ -139,39 +139,44 @@ jobs:
     steps:
       - name: Pull the exact commit that triggered this run
         working-directory: ${{ vars.PRIMARY_DEPLOY_PATH || 'C:\SYP' }}
-        shell: pwsh
+        shell: powershell
         run: |
           git fetch origin main
           git reset --hard origin/main
 
       - name: Pin full-feature flags for any service-triggered rebuild
         working-directory: ${{ vars.PRIMARY_DEPLOY_PATH || 'C:\SYP' }}
-        shell: pwsh
+        shell: powershell
         run: |
           # Git-ignored local file. prepare-client.mjs can rebuild the bundle when
           # the service restarts; it must build the FULL UI, not the fallback.
-          @'
-          VITE_API_URL=/api
-          VITE_ENABLE_GOOGLE_AUTH=true
-          '@ | Set-Content -Path client\.env.production.local -Encoding utf8
+          $envFile = @(
+            'VITE_API_URL=/api',
+            'VITE_ENABLE_GOOGLE_AUTH=true'
+          ) -join "`n"
+          [System.IO.File]::WriteAllText(
+            (Join-Path $PWD.Path 'client\.env.production.local'),
+            $envFile,
+            (New-Object System.Text.UTF8Encoding($false))
+          )
 
       - name: Install clean dependencies
         working-directory: ${{ vars.PRIMARY_DEPLOY_PATH || 'C:\SYP' }}
-        shell: pwsh
+        shell: powershell
         run: |
           npm ci --prefix server
           npm ci --prefix client
 
       - name: Build the FULL client (Google Sign-In enabled)
         working-directory: ${{ vars.PRIMARY_DEPLOY_PATH || 'C:\SYP' }}
-        shell: pwsh
+        shell: powershell
         run: |
           $env:VITE_API_URL = '/api'
           $env:VITE_ENABLE_GOOGLE_AUTH = 'true'
           npm run build --prefix client
 
       - name: Restart the TransitSync web service
-        shell: pwsh
+        shell: powershell
         run: |
           $task = 'TransitSync-Web'
           if (Get-ScheduledTask -Name $task -ErrorAction SilentlyContinue) {
@@ -185,13 +190,13 @@ jobs:
 
       - name: Verify MySQL connectivity via /api/health + Google route
         working-directory: ${{ vars.PRIMARY_DEPLOY_PATH || 'C:\SYP' }}
-        shell: pwsh
+        shell: powershell
         run: |
           node scripts\verify-deploy.mjs http://127.0.0.1:3100/api/health 120000 --expect-google-route
 
       - name: Purge edge cache so no stale HTML/JS survives the restart
         if: env.CF_TOKEN != '' && env.CF_ZONE != ''
-        shell: pwsh
+        shell: powershell
         run: |
           $body = '{"purge_everything":true}'
           curl.exe -fsS -X POST `
