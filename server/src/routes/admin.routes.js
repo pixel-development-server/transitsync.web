@@ -29,8 +29,8 @@ router.use(requireAuth, requireSystemAdmin);
 
 const LOCKDOWN_KEY = 'system.lockdown';
 
-function readLockdown() {
-  const row = getDb().prepare('SELECT value FROM settings WHERE key = ?').get(LOCKDOWN_KEY);
+async function readLockdown() {
+  const row = await getDb().get('SELECT value FROM settings WHERE `key` = ?', LOCKDOWN_KEY);
   if (!row?.value) {
     return { locked: false, message: null, by: null, at: null };
   }
@@ -48,7 +48,7 @@ function readLockdown() {
 /** Archive the full audit trail as a downloadable RFC-4180 CSV snapshot. */
 router.get('/audit/export', asyncHandler(async (req, res) => {
   const db = getDb();
-  const { rows } = listAudit(db, { limit: 100000, offset: 0 });
+  const { rows } = await listAudit(db, { limit: 100000, offset: 0 });
 
   const columns = [
     { key: 'id', label: 'ID' },
@@ -80,10 +80,11 @@ router.post('/audit/purge', asyncHandler(async (req, res) => {
     ]);
   }
 
-  const statement = db.prepare(
-    days === 0 ? 'DELETE FROM audit_logs' : "DELETE FROM audit_logs WHERE created_at < datetime('now', ?)",
-  );
-  const purged = (days === 0 ? statement.run() : statement.run(`-${days} days`)).changes;
+  const purged = (
+    days === 0
+      ? await db.run('DELETE FROM audit_logs')
+      : await db.run('DELETE FROM audit_logs WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY)', days)
+  ).changes;
 
   // Recorded after the delete so this very entry survives the flush.
   recordAudit(fromRequest(req, 'audit.purge', { entity: 'audit', detail: { olderThanDays: days, purged } }));
@@ -102,7 +103,7 @@ router.post('/audit/purge', asyncHandler(async (req, res) => {
 
 /** Current lockout state (safe for the System Admin console). */
 router.get('/lockdown', asyncHandler(async (req, res) => {
-  res.json({ success: true, data: readLockdown() });
+  res.json({ success: true, data: await readLockdown() });
 }));
 
 /** Engage or clear the global lockout. Non-admin sessions freeze while engaged. */
@@ -115,13 +116,14 @@ router.post('/lockdown', asyncHandler(async (req, res) => {
       : null;
 
   const state = { locked, message, by: req.user.email, at: new Date().toISOString() };
-  db.prepare(
-    `INSERT INTO settings (key, value, label, group_name, value_type, updated_at)
-     VALUES (?, ?, 'Global emergency lockout', 'system', 'json', datetime('now'))
-     ON CONFLICT(key) DO UPDATE SET
-       value = excluded.value, label = excluded.label, group_name = excluded.group_name,
-       value_type = excluded.value_type, updated_at = datetime('now')`,
-  ).run(LOCKDOWN_KEY, JSON.stringify(state));
+  await db.run(
+    `INSERT INTO settings (\`key\`, value, label, group_name, value_type, updated_at)
+     VALUES (?, ?, 'Global emergency lockout', 'system', 'json', NOW())
+     ON DUPLICATE KEY UPDATE
+       value = VALUES(value), label = VALUES(label), group_name = VALUES(group_name),
+       value_type = VALUES(value_type), updated_at = NOW()`,
+    LOCKDOWN_KEY, JSON.stringify(state),
+  );
 
   recordAudit(
     fromRequest(req, locked ? 'system.lockdown' : 'system.lockdown_clear', { entity: 'system' }),
@@ -144,18 +146,16 @@ router.post('/sessions/revoke', asyncHandler(async (req, res) => {
 
   let revoked;
   if (userId != null) {
-    if (!loadUserForAuth(db, userId)) throw notFound('Staff member');
-    revoked = db
-      .prepare(
-        "UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = ? WHERE user_id = ? AND revoked_at IS NULL",
-      )
-      .run('session_override_admin', userId).changes;
+    if (!(await loadUserForAuth(db, userId))) throw notFound('Staff member');
+    revoked = (await db.run(
+      "UPDATE login_sessions SET revoked_at = NOW(), revoked_reason = ? WHERE user_id = ? AND revoked_at IS NULL",
+      'session_override_admin', userId,
+    )).changes;
   } else if (all) {
-    revoked = db
-      .prepare(
-        "UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = ? WHERE user_id <> ? AND revoked_at IS NULL",
-      )
-      .run('session_override_all', req.user.id).changes;
+    revoked = (await db.run(
+      "UPDATE login_sessions SET revoked_at = NOW(), revoked_reason = ? WHERE user_id <> ? AND revoked_at IS NULL",
+      'session_override_all', req.user.id,
+    )).changes;
   } else {
     throw badRequest('Pass either a userId, or all: true.', [
       { field: 'body', message: 'Provide userId or all.' },
@@ -177,21 +177,23 @@ router.post(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const target = loadUserForAuth(db, id);
+    const target = await loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
 
     const plain = generateTemporaryPassword();
     const passwordHash = await hashPassword(plain);
 
-    db.transaction(() => {
-      db.prepare(
+    await db.transaction(async () => {
+      await db.run(
         `UPDATE users SET password_hash = ?, password_changed = 0, is_first_login = 1,
                           force_password_reset = 1, token_version = token_version + 1,
-                          updated_at = datetime('now') WHERE id = ?`,
-      ).run(passwordHash, id);
-      db.prepare(
-        "UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = 'admin_password_override' WHERE user_id = ? AND revoked_at IS NULL",
-      ).run(id);
+                          updated_at = NOW() WHERE id = ?`,
+        passwordHash, id,
+      );
+      await db.run(
+        "UPDATE login_sessions SET revoked_at = NOW(), revoked_reason = 'admin_password_override' WHERE user_id = ? AND revoked_at IS NULL",
+        id,
+      );
     });
 
     recordAudit(fromRequest(req, 'user.reset_override', { entity: 'user', entityId: id, detail: { email: target.email } }));

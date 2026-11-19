@@ -7,6 +7,7 @@ import { ensureSuperAdmin } from './db/seed.js';
 import { ROLE_KEYS } from './db/permissions.js';
 import { createApp } from './app.js';
 import { hub } from './services/realtime.js';
+import * as logger from '../logger.js';
 
 /**
  * Boot sequence: verify the schema is current, then start listening. Migrations
@@ -19,48 +20,45 @@ import { hub } from './services/realtime.js';
  * `npm run seed` still creates an administrator for headless/automated installs,
  * but it is now an explicit operator action rather than a side effect of booting.
  */
-function bootstrap() {
-  const dbFile = process.env.DB_FILE || config.paths.dbFile;
-
-  if (dbFile !== ':memory:') {
-    // Fresh install: create the file so SQLite can open it.
-    if (!fs.existsSync(dbFile)) fs.writeFileSync(dbFile, '');
-  }
-
+async function bootstrap() {
   const db = getDb();
 
-  const results = runMigrations(db, {
-    log: (message) => process.stdout.write(`${message}\n`),
+  const results = await runMigrations({
+    log: (message) => logger.info(message),
   });
   const applied = results.filter((entry) => entry.applied).length;
-  if (applied) process.stdout.write(`  ${applied} migration(s) applied.\n`);
+  if (applied) logger.success(`${applied} migration(s) applied.`);
 
   // Level 200 platform owner. The operator now creates this account through the
   // first-run wizard (so they choose their own email/name/password) or from the
   // Super Admin console. An environment-seeded owner is only materialised when
   // `SUPER_ADMIN_BOOTSTRAP=true` is set explicitly, for headless installs.
   if (config.superAdmin.bootstrap) {
-    const superAdmin = ensureSuperAdmin(db);
+    const superAdmin = await ensureSuperAdmin(db);
     if (superAdmin?.created) {
-      process.stdout.write(
-        `  Platform Super Administrator created: ${superAdmin.email} (forced change on first sign-in).\n`,
+      logger.success(
+        `Platform Super Administrator created: ${superAdmin.email} (forced change on first sign-in).`,
       );
     }
   }
 
-  const admin = db
-    .prepare(
+  const admin = await db
+    .get(
       `SELECT COUNT(*) AS n FROM users u
          JOIN roles r ON r.id = u.role_id
-        WHERE r.key IN (?, ?)`,
-    )
-    .get(ROLE_KEYS.SYSTEM_ADMIN, ROLE_KEYS.SUPER_ADMIN);
+        WHERE r.\`key\` IN (?, ?)`,
+      ROLE_KEYS.SYSTEM_ADMIN, ROLE_KEYS.SUPER_ADMIN,
+    );
   const needsSetup = admin.n === 0;
 
   return { db, needsSetup };
 }
 
-const { needsSetup } = bootstrap();
+const { needsSetup } = await bootstrap();
+
+// Begin persisting activity to logs/server_activity.log on the once-a-minute
+// cadence; the buffer also flushes on exit, so nothing in flight is lost.
+logger.startActivityLog();
 
 /**
  * Every non-internal IPv4 address this host answers on — the LAN address, and
@@ -82,26 +80,25 @@ function networkUrls(port) {
 const app = createApp();
 const server = app.listen(config.port, config.host, () => {
   const lan = networkUrls(config.port);
-  const banner = [
-    '',
-    '  \x1b[1m\x1b[36mTransitSync\x1b[0m — RFID campus shuttle operations console',
-    `  \x1b[2m────────────────────────────────────────────────────────────\x1b[0m`,
-    `  console   http://localhost:${config.port}`,
-    ...lan.map((url) => `  network   ${url}`),
-    `  api       http://localhost:${config.port}/api/health`,
-    `  stream    http://localhost:${config.port}/api/stream  (SSE, JWT required)`,
-    `  database  ${process.env.DB_FILE || config.paths.dbFile}`,
-    `  mode      ${config.nodeEnv}`,
-    '',
-  ];
+
+  logger.heading('TransitSync — RFID campus shuttle operations console');
+  logger.fields('INFO', [
+    ['console', `http://localhost:${config.port}`],
+    ...lan.map((url) => ['network', url]),
+    ['api', `http://localhost:${config.port}/api/health`],
+    ['stream', `http://localhost:${config.port}/api/stream  (SSE, JWT required)`],
+    ['database', `${config.db.host}:${config.db.port}/${config.db.database}`],
+    ['mode', config.nodeEnv],
+  ]);
+  logger.success(`Listening on ${config.host}:${config.port}.`);
+
   if (needsSetup) {
-    banner.push(
-      '  \x1b[33m\x1b[1mNo System Administrator exists yet.\x1b[0m',
-      `  \x1b[33mCreate the master account now:\x1b[0m  http://localhost:${config.port}/system-setup`,
-      '',
-    );
+    logger.warn('No System Administrator exists yet.');
+    logger.warn(`Create the master account now: http://localhost:${config.port}/system-setup`);
   }
-  process.stdout.write(`${banner.join('\n')}\n`);
+
+  // Get the startup report on disk immediately rather than waiting a full minute.
+  logger.flushActivityLog();
 });
 
 server.headersTimeout = 0;
@@ -112,12 +109,13 @@ let shuttingDown = false;
 function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
-  process.stdout.write(`\n  ${signal} received — shutting down.\n`);
+  logger.info(`${signal} received — shutting down.`);
 
   hub.closeAll();
   server.close(() => {
     closeDb();
-    process.stdout.write('  Bye.\n');
+    logger.info('Bye.');
+    logger.stopActivityLog();
     process.exit(0);
   });
 
@@ -128,10 +126,10 @@ function shutdown(signal) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('unhandledRejection', (reason) => {
-  process.stderr.write(`\n  Unhandled rejection: ${reason instanceof Error ? reason.stack : reason}\n`);
+  logger.error(`Unhandled rejection: ${reason instanceof Error ? reason.stack : reason}`);
 });
 process.on('uncaughtException', (error) => {
-  process.stderr.write(`\n  Uncaught exception: ${error.stack}\n`);
+  logger.error(`Uncaught exception: ${error.stack}`);
   shutdown('uncaughtException');
 });
 

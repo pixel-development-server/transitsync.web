@@ -1,0 +1,30 @@
+# Server environment / secrets (.env.example is the committed template)
+.env
+.env.*
+!.env.example
+!.env.example.*
+
+# Local database files, dumps and backups
+data/
+storage/
+backups/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-*
+*.sql.gz
+*.dump
+*.bak
+
+# Logs and process state
+logs/
+*.log
+.pm2/
+*.pid
+transitsync-service.active
+
+# Build output
+dist/
+build/dist/

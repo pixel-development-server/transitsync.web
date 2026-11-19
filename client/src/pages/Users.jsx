@@ -565,10 +565,22 @@ export default function Users() {
 
   const forceReset = async () => {
     try {
-      await api.post(`/users/${resetting.id}/force-password-reset`);
-      toast.success(`${resetting.fullName} must change their password at next sign-in.`);
+      const response = await api.post(`/users/${resetting.id}/force-password-reset`);
+      const temporaryPassword = response?.data?.temporaryPassword;
       setResetting(null);
       reload({ silent: true });
+      // The server hands back a one-time temporary password. Surface it in the
+      // same copy-once dialog as account creation so the admin can hand the
+      // holder a credential they can actually sign in with and rotate.
+      if (temporaryPassword) {
+        setIssued({
+          email: resetting.email,
+          fullName: resetting.fullName,
+          temporaryPassword,
+        });
+        return;
+      }
+      toast.success(`${resetting.fullName} must change their password at next sign-in.`);
     } catch (caught) {
       toast.error(caught.message);
     }
@@ -628,6 +640,7 @@ export default function Users() {
     {
       key: 'permissions',
       label: 'Effective access',
+      hideBelow: 'lg',
       render: (row) => (
         <div className="min-w-0">
           <p className="tabular text-[0.75rem] text-mist-300">{row.permissions?.length ?? 0} permissions</p>
@@ -641,6 +654,7 @@ export default function Users() {
     {
       key: 'campus',
       label: 'Campus',
+      hideBelow: 'md',
       render: (row) =>
         Number(row.roleLevel ?? 0) >= 200 ? (
           <Badge tone="accent">Platform</Badge>
@@ -651,6 +665,7 @@ export default function Users() {
     {
       key: 'sessions',
       label: 'Sessions',
+      hideBelow: 'xl',
       align: 'center',
       nowrap: true,
       render: (row) =>
@@ -677,6 +692,7 @@ export default function Users() {
     {
       key: 'lastLoginAt',
       label: 'Last sign-in',
+      hideBelow: 'lg',
       align: 'right',
       nowrap: true,
       sortKey: 'lastLogin',
@@ -774,7 +790,7 @@ export default function Users() {
       <div className="card mb-4 p-3.5">
         <FilterBar onClear={search || role || status ? clearFilters : undefined}>
           <Input
-            wrapperClass="min-w-[13rem] flex-1"
+            wrapperClass="w-full min-w-0 flex-1 sm:min-w-[13rem]"
             placeholder="Search name or email…"
             icon="search"
             value={search}
@@ -782,7 +798,7 @@ export default function Users() {
             aria-label="Search users"
           />
           <Select
-            wrapperClass="w-52"
+            wrapperClass="w-full sm:w-52"
             label="Role"
             value={role}
             onChange={(event) => setRole(event.target.value)}
@@ -790,7 +806,7 @@ export default function Users() {
             placeholder="Any role"
           />
           <Select
-            wrapperClass="w-40"
+            wrapperClass="w-full sm:w-40"
             label="Status"
             value={status}
             onChange={(event) => setStatus(event.target.value)}
@@ -862,11 +878,11 @@ export default function Users() {
         onClose={() => setResetting(null)}
         onConfirm={forceReset}
         title="Force password reset"
-        confirmLabel="Force reset"
+        confirmLabel="Reset & issue password"
         tone="danger"
         message={
           resetting
-            ? `${resetting.fullName} will be required to change their password at the next sign-in, and all other active sessions will be revoked.`
+            ? `${resetting.fullName} will be issued a one-time temporary password to sign in with, and must choose their own at that sign-in. All of their active sessions will be revoked.`
             : ''
         }
       />

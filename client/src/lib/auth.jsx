@@ -10,7 +10,8 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
-import { api, setToken, setUnauthorizedHandler, getToken } from './api.js';
+import { api, setToken, setUnauthorizedHandler, getToken, ApiError } from './api.js';
+import { getDeviceFingerprint } from './deviceFingerprint.js';
 
 const AuthContext = createContext(null);
 
@@ -48,7 +49,7 @@ export function AuthProvider({ children }) {
     return () => setUnauthorizedHandler(null);
   }, []);
 
-  const loadSession = useCallback(async ({ silent = false } = {}) => {
+  const loadSession = useCallback(async ({ silent = false, strict = false } = {}) => {
     if (!getToken()) {
       setUser(null);
       setSession(null);
@@ -62,10 +63,15 @@ export function AuthProvider({ children }) {
       setUser(response.data.user);
       setSession(response.data.session ?? null);
       return response.data.user;
-    } catch {
+    } catch (cause) {
       setToken(null);
       setUser(null);
       setSession(null);
+      // The initial probe treats a dead token as "signed out". A caller that
+      // has *just* exchanged credentials (login, Google, 2FA) passes
+      // `strict: true` so a broken /me cannot look like a successful sign-in
+      // that silently bounces back to the login page.
+      if (strict) throw cause;
       return null;
     } finally {
       setLoading(false);
@@ -84,15 +90,30 @@ export function AuthProvider({ children }) {
    * array and session row the app actually runs on.
    */
   const establishSession = useCallback(async (data) => {
-    if (!data?.token) return null;
+    if (!data?.token) {
+      throw new ApiError({
+        code: 'SESSION_NOT_ISSUED',
+        message: 'The server did not return a session. Please try signing in again.',
+        status: 502,
+      });
+    }
     setToken(data.token);
-    const me = await loadSession({ silent: true });
+    const me = await loadSession({ silent: true, strict: true });
     return me ?? data.user ?? null;
   }, [loadSession]);
 
   const signIn = useCallback(
-    async (email, password, rememberMe = false) => {
-      const response = await api.post('/auth/login', { email, password, rememberMe });
+    async (email, password, rememberMe = false, portalType = 'staff') => {
+      // The fingerprint is what lets the server recognise this browser and, with
+      // `rememberMe`, extend the session to the recognised-device TTL. It is
+      // stable per browser install, not a tracking id.
+      const response = await api.post('/auth/login', {
+        email,
+        password,
+        rememberMe,
+        portalType,
+        deviceFingerprint: getDeviceFingerprint(),
+      });
       return establishSession(response.data);
     },
     [establishSession],

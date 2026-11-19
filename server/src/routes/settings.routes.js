@@ -28,8 +28,8 @@ const DEFAULTS = [
   { key: 'maintenance_message', value: 'Server is currently under maintenance. Please try again later.', label: 'Maintenance message', group: 'operations' },
 ];
 
-function readSettings(db) {
-  const stored = new Map(db.prepare('SELECT * FROM settings').all().map((row) => [row.key, row]));
+async function readSettings(db) {
+  const stored = new Map((await db.all('SELECT * FROM settings')).map((row) => [row.key, row]));
   return DEFAULTS.map((definition) => {
     const row = stored.get(definition.key);
     const raw = row ? row.value : definition.value;
@@ -62,20 +62,23 @@ router.get(
   requirePermission('settings:read'),
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const dbSize = db.pragma('page_count')[0]?.page_count ?? 0;
-    const pageSize = db.pragma('page_size')[0]?.page_size ?? 0;
+    const size = await db.get(
+      `SELECT COALESCE(SUM(data_length + index_length), 0) AS size_bytes
+         FROM information_schema.tables
+        WHERE table_schema = DATABASE()`,
+    );
 
     res.json({
       success: true,
       data: {
-        settings: readSettings(db),
+        settings: await readSettings(db),
         system: {
           nodeEnv: config.nodeEnv,
           version: '1.0.0',
-          databaseSizeBytes: dbSize * pageSize,
-          permissions: db.prepare('SELECT COUNT(*) AS n FROM permissions').get().n,
-          roles: db.prepare('SELECT COUNT(*) AS n FROM roles').get().n,
-          users: db.prepare('SELECT COUNT(*) AS n FROM users').get().n,
+          databaseSizeBytes: size.size_bytes,
+          permissions: (await db.get('SELECT COUNT(*) AS n FROM permissions')).n,
+          roles: (await db.get('SELECT COUNT(*) AS n FROM roles')).n,
+          users: (await db.get('SELECT COUNT(*) AS n FROM users')).n,
         },
       },
     });
@@ -90,7 +93,7 @@ const updateSettings = asyncHandler(async (req, res) => {
   const db = getDb();
   const changed = {};
 
-  db.transaction(() => {
+  await db.transaction(async () => {
     for (const [field, key] of Object.entries(KEY_TO_SETTING)) {
       if (req.body[field] === undefined) continue;
       const definition = DEFAULTS.find((entry) => entry.key === key);
@@ -99,25 +102,26 @@ const updateSettings = asyncHandler(async (req, res) => {
 
       // Turning maintenance ON with nobody able to turn it off would lock the
       // whole campus out, so refuse it until a Super Administrator exists.
-      if (key === 'maintenance_mode') assertMaintenanceSwitchable(db, value === 'true');
+      if (key === 'maintenance_mode') await assertMaintenanceSwitchable(db, value === 'true');
 
       changed[key] = value;
 
-      db.prepare(
-        `INSERT INTO settings (key, value, label, group_name, value_type, updated_by, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-         ON CONFLICT(key) DO UPDATE SET
-           value = excluded.value, updated_by = excluded.updated_by, updated_at = datetime('now')`,
-      ).run(key, value, definition?.label ?? key, definition?.group ?? 'general', type, req.user.id);
+      await db.run(
+        `INSERT INTO settings (\`key\`, value, label, group_name, value_type, updated_by, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+           value = VALUES(value), updated_by = VALUES(updated_by), updated_at = NOW()`,
+        key, value, definition?.label ?? key, definition?.group ?? 'general', type, req.user.id,
+      );
 
       if (key === 'institution_name') {
-        db.prepare("INSERT OR REPLACE INTO system_meta (key, value, updated_at) VALUES ('institution_name', ?, datetime('now'))").run(value);
+        await db.run("REPLACE INTO system_meta (\`key\`, value, updated_at) VALUES ('institution_name', ?, NOW())", value);
       }
     }
   });
 
   recordAudit(fromRequest(req, 'settings.update', { entity: 'settings', detail: changed }));
-  res.json({ success: true, data: { settings: readSettings(db), changed } });
+  res.json({ success: true, data: { settings: await readSettings(db), changed } });
 });
 
 router.patch('/', requirePermission('settings:edit'), validate(settingsPatchSchema), updateSettings);
@@ -127,6 +131,43 @@ router.put('/', requirePermission('settings:edit'), validate(settingsPatchSchema
 // Database backup — System Administrator only
 // ---------------------------------------------------------------------------
 
+/**
+ * Logical dump of every base table (schema DDL + one INSERT per row) written
+ * to `target`. The snapshot is assembled through the pool: `SHOW CREATE TABLE`
+ * for each table, then `SELECT *` to serialise its rows.
+ */
+async function writeLogicalDump(db, target) {
+  const fs = await import('node:fs');
+  const tables = await db.all(
+    "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name",
+  );
+
+  const literal = (value) => {
+    if (value === null || value === undefined) return 'NULL';
+    if (typeof value === 'number' || typeof value === 'bigint') return String(value);
+    if (Buffer.isBuffer(value)) return `X'${value.toString('hex')}'`;
+    return `'${String(value).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
+  };
+
+  const lines = ['-- TransitSync logical database backup'];
+  for (const { name } of tables) {
+    const [createRow] = await db.all(`SHOW CREATE TABLE \`${name}\``);
+    lines.push('', `DROP TABLE IF EXISTS \`${name}\`;`, `${createRow['Create Table']};`);
+
+    const rows = await db.all(`SELECT * FROM \`${name}\``);
+    if (!rows.length) continue;
+    const columns = Object.keys(rows[0]);
+    const columnList = columns.map((column) => `\`${column}\``).join(', ');
+    for (const row of rows) {
+      lines.push(
+        `INSERT INTO \`${name}\` (${columnList}) VALUES (${columns.map((column) => literal(row[column])).join(', ')});`,
+      );
+    }
+  }
+
+  fs.writeFileSync(target, `${lines.join('\n')}\n`);
+}
+
 router.get(
   '/backups',
   requirePermission('backup:create'),
@@ -134,7 +175,7 @@ router.get(
     const fs = await import('node:fs');
     const files = fs
       .readdirSync(config.paths.backupDir)
-      .filter((file) => file.endsWith('.db'))
+      .filter((file) => file.endsWith('.sql'))
       .map((file) => {
         const stats = fs.statSync(`${config.paths.backupDir}/${file}`);
         return {
@@ -150,8 +191,8 @@ router.get(
 );
 
 /**
- * Consistent snapshot via SQLite's VACUUM INTO. Safe to run while the server is
- * serving traffic because it takes a read lock rather than copying pages.
+ * Consistent snapshot via a logical dump (see `writeLogicalDump`). Safe to run
+ * while the server is serving traffic because it only reads from the pool.
  */
 router.post(
   '/backups',
@@ -163,11 +204,11 @@ router.post(
     const pad = (value) => String(value).padStart(2, '0');
     const now = new Date();
     const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-    const file = `transitsync-${stamp}.db`;
+    const file = `transitsync-${stamp}.sql`;
     const target = `${config.paths.backupDir}/${file}`;
 
     if (fs.existsSync(target)) fs.rmSync(target);
-    db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+    await writeLogicalDump(db, target);
 
     const stats = fs.statSync(target);
     recordAudit(fromRequest(req, 'backup.create', { entity: 'backup', entityId: file, detail: { sizeBytes: stats.size } }));

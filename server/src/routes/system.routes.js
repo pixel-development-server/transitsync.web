@@ -37,16 +37,16 @@ router.get(
   '/status',
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const global = getMaintenance(db);
+    const global = await getMaintenance(db);
 
     const tenantId = typeof req.query.tenant_id === 'string' && req.query.tenant_id ? req.query.tenant_id : null;
     const email = typeof req.query.email === 'string' && req.query.email ? req.query.email : null;
 
     let tenant = null;
     if (tenantId) {
-      tenant = getInstitutionMaintenance(db, tenantId);
+      tenant = await getInstitutionMaintenance(db, tenantId);
     } else if (email) {
-      tenant = resolveTenantMaintenanceByEmail(db, email);
+      tenant = await resolveTenantMaintenanceByEmail(db, email);
     }
 
     if (!tenant) {

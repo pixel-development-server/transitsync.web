@@ -1,6 +1,6 @@
 import { getDb } from '../db/connection.js';
 import hub from './realtime.js';
-import { formatNpt, toUtcSqlite } from '../lib/time.js';
+import { formatNpt, toNptStamp } from '../lib/time.js';
 
 /** Alert taxonomy surfaced as colour-coded tags in the console. */
 export const ALERT_TYPES = {
@@ -55,40 +55,38 @@ export const SIMULATOR_OUTCOMES = [
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
-function raiseAlert(db, { type, title, message, severity, scanEventId, studentId, busId, routeId, metadata }) {
+async function raiseAlert(db, { type, title, message, severity, scanEventId, studentId, busId, routeId, metadata, tenantId = null }) {
   const resolvedType = type ?? 'SYSTEM';
   const definition = ALERT_TYPES[resolvedType] ?? ALERT_TYPES.SYSTEM;
-  const result = db
-    .prepare(
-      `INSERT INTO alerts (type, severity, title, message, scan_event_id, student_id, bus_id, route_id, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      resolvedType,
-      severity ?? definition.severity,
-      title,
-      message,
-      scanEventId ?? null,
-      studentId ?? null,
-      busId ?? null,
-      routeId ?? null,
-      metadata ? JSON.stringify(metadata) : null,
-    );
+  const result = await db.run(
+    `INSERT INTO alerts (type, severity, title, message, scan_event_id, student_id, bus_id, route_id, metadata, tenant_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    resolvedType,
+    severity ?? definition.severity,
+    title,
+    message,
+    scanEventId ?? null,
+    studentId ?? null,
+    busId ?? null,
+    routeId ?? null,
+    metadata ? JSON.stringify(metadata) : null,
+    tenantId ?? null,
+  );
 
-  return db
-    .prepare(
-      `SELECT a.*, s.full_name AS student_name, b.code AS bus_code, r.code AS route_code
-         FROM alerts a
-         LEFT JOIN students s ON s.id = a.student_id
-         LEFT JOIN buses b    ON b.id = a.bus_id
-         LEFT JOIN routes r   ON r.id = a.route_id
-        WHERE a.id = ?`,
-    )
-    .get(result.lastInsertRowid);
+  return db.get(
+    `SELECT a.*, s.full_name AS student_name, b.code AS bus_code, r.code AS route_code
+       FROM alerts a
+       LEFT JOIN students s ON s.id = a.student_id
+       LEFT JOIN buses b    ON b.id = a.bus_id
+       LEFT JOIN routes r   ON r.id = a.route_id
+      WHERE a.id = ?`,
+    result.lastInsertRowid,
+  );
 }
 
-export function getBusOccupancy(db, busId) {
-  return db.prepare('SELECT COUNT(*) AS n FROM students WHERE onboard_bus_id = ?').get(busId).n;
+export async function getBusOccupancy(db, busId) {
+  const row = await db.get('SELECT COUNT(*) AS n FROM students WHERE onboard_bus_id = ?', busId);
+  return row.n;
 }
 
 /**
@@ -104,6 +102,9 @@ export function shapeScanEvent(row) {
     id: row.id,
     rfidSerial: row.rfid_serial,
     studentId: row.student_id,
+    // Campus this event belongs to — the SSE fan-out filters on it so one
+    // college's live board never shows another college's taps.
+    tenantId: row.tenant_id ?? null,
     studentName: row.student_name ?? 'Unknown card',
     collegeId: row.college_id,
     faculty: row.faculty,
@@ -141,7 +142,7 @@ export function shapeScanEvent(row) {
  * @returns {{outcome:string, scan:object, student:object|null, bus:object|null,
  *            alert:object|null, occupancy:number, capacity:number}}
  */
-export function processTap(input = {}) {
+export async function processTap(input = {}) {
   const db = getDb();
   const serial = String(input.rfidSerial ?? '').trim().toUpperCase().replace(/\s+/g, '');
   const busId = input.busId ? Number(input.busId) : null;
@@ -149,12 +150,13 @@ export function processTap(input = {}) {
   const longitude = input.longitude ?? null;
   const gate = input.gate ?? null;
   // A hardware relay may forward the reader's own timestamp; when it does, keep
-  // that instant (normalised to UTC) instead of the server's receive time.
-  const scanTimeUtc = toUtcSqlite(input.scanTime);
+  // that instant (normalised to NPT wall time, the zone the columns store in)
+  // instead of the server's receive time.
+  const scanTimeNpt = toNptStamp(input.scanTime);
 
   const bus = busId
-    ? db.prepare('SELECT b.*, r.code AS route_code, r.name AS route_name FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id WHERE b.id = ?').get(busId)
-    : db.prepare("SELECT b.*, r.code AS route_code, r.name AS route_name FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id WHERE b.status = 'ACTIVE' ORDER BY b.id LIMIT 1").get();
+    ? await db.get('SELECT b.*, r.code AS route_code, r.name AS route_name FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id WHERE b.id = ?', busId)
+    : await db.get("SELECT b.*, r.code AS route_code, r.name AS route_name FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id WHERE b.status = 'ACTIVE' ORDER BY b.id LIMIT 1");
 
   if (!serial) {
     throw new Error('An RFID serial is required to simulate a tap.');
@@ -166,69 +168,66 @@ export function processTap(input = {}) {
   const resolvedBusId = bus?.id ?? null;
   const routeId = bus?.current_route_id ?? null;
 
-  const result = db.transaction(() => {
-    const student = db
-      .prepare("SELECT * FROM students WHERE UPPER(REPLACE(rfid_serial, ' ', '')) = ?")
-      .get(serial) ?? null;
+  const result = await db.transaction(async () => {
+    const student = await db.get("SELECT * FROM students WHERE UPPER(REPLACE(rfid_serial, ' ', '')) = ?", serial) ?? null;
+    // Campus ownership of everything written below: the rider's campus first,
+    // else the campus that runs the bus the tap happened on, else a
+    // campus-neutral (system) event.
+    const tenantId = student?.tenant_id ?? bus?.tenant_id ?? null;
 
     const verdict = evaluateTap({ student, bus, today: todayISO() });
 
     // A successful tap flips the passenger's live occupancy pointer.
-    let occupancyAfter = resolvedBusId ? getBusOccupancy(db, resolvedBusId) : 0;
+    let occupancyAfter = resolvedBusId ? await getBusOccupancy(db, resolvedBusId) : 0;
 
     if (verdict.outcome === 'VALID' && resolvedBusId) {
       const boarding = verdict.direction === 'BOARD';
       if (boarding) {
-        db.prepare("UPDATE students SET onboard_bus_id = ?, onboard_at = datetime('now'), updated_at = datetime('now') WHERE id = ?")
-          .run(resolvedBusId, student.id);
+        await db.run("UPDATE students SET onboard_bus_id = ?, onboard_at = NOW(), updated_at = NOW() WHERE id = ?", resolvedBusId, student.id);
       } else {
-        db.prepare("UPDATE students SET onboard_bus_id = NULL, onboard_at = NULL, updated_at = datetime('now') WHERE id = ?")
-          .run(student.id);
+        await db.run("UPDATE students SET onboard_bus_id = NULL, onboard_at = NULL, updated_at = NOW() WHERE id = ?", student.id);
       }
-      occupancyAfter = getBusOccupancy(db, resolvedBusId);
+      occupancyAfter = await getBusOccupancy(db, resolvedBusId);
     }
 
-    const scanResult = db
-      .prepare(
-        `INSERT INTO scan_events
-           (rfid_serial, student_id, bus_id, route_id, direction, outcome, message,
-            latitude, longitude, gate, occupancy_after, scan_time)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
-      )
-      .run(
-        serial,
-        student?.id ?? null,
-        resolvedBusId,
-        routeId,
-        verdict.direction,
-        verdict.outcome,
-        verdict.message,
-        latitude,
-        longitude,
-        gate,
-        occupancyAfter,
-        scanTimeUtc,
-      );
+    const scanResult = await db.run(
+      `INSERT INTO scan_events
+         (rfid_serial, student_id, bus_id, route_id, direction, outcome, message,
+          latitude, longitude, gate, occupancy_after, scan_time, tenant_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, NOW()), ?)`,
+      serial,
+      student?.id ?? null,
+      resolvedBusId,
+      routeId,
+      verdict.direction,
+      verdict.outcome,
+      verdict.message,
+      latitude,
+      longitude,
+      gate,
+      occupancyAfter,
+      scanTimeNpt,
+      tenantId,
+    );
 
-    const scan = db
-      .prepare(
-        `SELECT e.*, s.full_name AS student_name, s.college_id, s.faculty,
-                b.code AS bus_code, b.name AS bus_name, b.seat_capacity,
-                r.code AS route_code, r.name AS route_name
-           FROM scan_events e
-           LEFT JOIN students s ON s.id = e.student_id
-           LEFT JOIN buses b    ON b.id = e.bus_id
-           LEFT JOIN routes r   ON r.id = e.route_id
-          WHERE e.id = ?`,
-      )
-      .get(scanResult.lastInsertRowid);
+    const scan = await db.get(
+      `SELECT e.*, s.full_name AS student_name, s.college_id, s.faculty,
+              b.code AS bus_code, b.name AS bus_name, b.seat_capacity,
+              r.code AS route_code, r.name AS route_name
+         FROM scan_events e
+         LEFT JOIN students s ON s.id = e.student_id
+         LEFT JOIN buses b    ON b.id = e.bus_id
+         LEFT JOIN routes r   ON r.id = e.route_id
+        WHERE e.id = ?`,
+      scanResult.lastInsertRowid,
+    );
 
     // Alerts are reserved for cards whose UID is unknown to the registry. Any
     // other problem (wrong bus, revoked card, suspended student, over-capacity)
     // is a normal activity log entry and never becomes an Unregistered Alert.
     let alert = null;
     if (verdict.outcome === 'UNREGISTERED_CARD' && verdict.alertType) {
-      alert = raiseAlert(db, {
+      alert = await raiseAlert(db, {
         type: verdict.alertType,
         title: verdict.title,
         message: verdict.message,
@@ -237,6 +236,7 @@ export function processTap(input = {}) {
         busId: resolvedBusId,
         routeId,
         metadata: { serial, outcome: verdict.outcome, gate },
+        tenantId,
       });
     }
 
@@ -316,13 +316,15 @@ export function evaluateTap({ student, bus }) {
     };
   }
 
-  if (bus && (!student.bus_id || Number(student.bus_id) !== Number(bus.id))) {
+  // Per-student bus allocation (`students.bus_id`) was retired with the roster
+  // model; the live pointer is `onboard_bus_id`. A rider may board any bus —
+  // except while they are still aboard a *different* one, in which case they
+  // must tap off first rather than sit on two occupancy counts at once.
+  if (bus && student.onboard_bus_id && Number(student.onboard_bus_id) !== Number(bus.id)) {
     return {
       ...base,
       outcome: 'UNREGISTERED_BUS',
-      message: student.bus_id
-        ? `${name} is allocated to another bus and cannot board ${bus.code}.`
-        : `${name} has no bus allocation and cannot board ${bus.code}.`,
+      message: `${name} is still aboard another bus and cannot board ${bus.code}.`,
     };
   }
 
@@ -353,7 +355,7 @@ function publish({ scan, alert }) {
       routeCode: scan.route_code,
       studentId: scan.student_id,
       onboard: scan.direction === 'BOARD',
-    });
+    }, scan.tenant_id ?? null);
   }
   if (alert) {
     hub.broadcast('alert', 'alert', {
@@ -366,15 +368,16 @@ function publish({ scan, alert }) {
       createdAt: alert.created_at,
       busCode: alert.bus_code ?? null,
       studentName: alert.student_name ?? null,
+      tenantId: alert.tenant_id ?? null,
     });
   }
 }
 
 /** Raise a manual, operator-authored alert (Settings / fleet / student actions). */
-export function createManualAlert({ type = 'SYSTEM', title, message, severity, busId = null, routeId = null, studentId = null, metadata = null }) {
+export async function createManualAlert({ type = 'SYSTEM', title, message, severity, busId = null, routeId = null, studentId = null, metadata = null, tenantId = null }) {
   const db = getDb();
-  const alert = db.transaction(() =>
-    raiseAlert(db, { type, title, message, severity, busId, routeId, studentId, metadata }),
+  const alert = await db.transaction(async () =>
+    raiseAlert(db, { type, title, message, severity, busId, routeId, studentId, metadata, tenantId }),
   );
   hub.broadcast('alert', 'alert', {
     id: alert.id,
@@ -384,6 +387,7 @@ export function createManualAlert({ type = 'SYSTEM', title, message, severity, b
     message: alert.message,
     status: alert.status,
     createdAt: alert.created_at,
+    tenantId: alert.tenant_id ?? tenantId ?? null,
   });
   return alert;
 }

@@ -53,7 +53,7 @@ router.put(
       throw forbidden('This account is not attached to a campus.', { code: 'NO_TENANT' });
     }
 
-    const state = setInstitutionMaintenance(db, {
+    const state = await setInstitutionMaintenance(db, {
       tenantId,
       enabled: req.body.enabled,
       message: req.body.message,

@@ -90,34 +90,37 @@ test('wrong password does not authenticate and is audit logged', async () => {
 // Forced first-login password rotation
 // ---------------------------------------------------------------------------
 test('bootstrap admin is forced to rotate before touching anything else', async () => {
-  const session = await login(ctx, ADMIN_EMAIL, ADMIN_PASSWORD);
-  assert.equal(session.mustChangePassword, true);
-  assert.equal(session.user.isFirstLogin, true);
-  assert.equal(session.user.passwordChanged, false);
+  const halt = await login(ctx, ADMIN_EMAIL, ADMIN_PASSWORD);
 
-  // Bootstrap endpoints stay reachable.
-  const me = await call(ctx, 'GET', '/api/auth/me', { token: session.token });
-  assert.equal(me.status, 200);
-  assert.equal(me.body.data.user.mustChangePassword, true);
+  // The forced first-login answer is a halt, not a session: HTTP 200 carries
+  // `{ success: false, requireNewPassword: true }` and a single-use resetToken
+  // where a JWT would be, so there is no bearer credential yet. (The
+  // first-login flags live on the row — force-reset.test.js reads them
+  // straight from the database once the rotation lands.)
+  assert.equal(halt.mustChangePassword, true);
+  assert.equal(typeof halt.resetToken, 'string');
+  assert.ok(halt.resetToken.length > 20);
 
-  // Everything else is gated.
+  // Everything else is gated until the rotation lands: the reset token is not
+  // a session credential, so each protected door answers 401.
   for (const path of ['/api/dashboard', '/api/students', '/api/users', '/api/buses']) {
-    const blocked = await call(ctx, 'GET', path, { token: session.token });
-    assert.equal(blocked.status, 403, `${path} should be blocked during rotation`);
-    // A dedicated code lets the SPA route to the change-password screen instead
-    // of rendering a generic "permission denied".
-    assert.equal(blocked.body.error.code, 'PASSWORD_CHANGE_REQUIRED');
-    assert.equal(blocked.body.error.details.mustChangePassword, true);
+    const blocked = await call(ctx, 'GET', path, { token: halt.resetToken });
+    assert.equal(blocked.status, 401, `${path} should be blocked during rotation`);
   }
 });
 
 test('a weak replacement password is refused with per-rule feedback', async () => {
-  const session = await login(ctx, ADMIN_EMAIL, ADMIN_PASSWORD);
-  const response = await call(ctx, 'POST', '/api/auth/change-password', {
-    token: session.token,
-    body: { currentPassword: ADMIN_PASSWORD, newPassword: 'weak', confirmPassword: 'weak' },
+  const halt = await login(ctx, ADMIN_EMAIL, ADMIN_PASSWORD);
+  const response = await call(ctx, 'POST', '/api/auth/set-new-password', {
+    body: {
+      email: ADMIN_EMAIL,
+      resetToken: halt.resetToken,
+      newPassword: 'weak',
+      confirmPassword: 'weak',
+    },
   });
   assert.equal(response.status, 422);
+  assert.equal(response.body.error.code, 'VALIDATION_FAILED');
   const messages = response.body.error.details.map((detail) => detail.message).join(' ');
   assert.match(messages, /uppercase|at least/i);
 });
@@ -140,7 +143,7 @@ test('admin can force a password reset on another account, gating it immediately
     body: {
       email: `forced-${Date.now()}@transitsync.edu.np`,
       fullName: 'Forced Reset Subject',
-      roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
+      roleId: await roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
       temporaryPassword: 'InitialPass!2024',
       forcePasswordChange: true,
     },
@@ -309,7 +312,7 @@ test('CUSTOM permissions override the role and take effect on the next sign-in',
     body: {
       email: `restricted-${Date.now()}@transitsync.edu.np`,
       fullName: 'Restricted Attendant',
-      roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
+      roleId: await roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
       temporaryPassword: 'RestrictPass!24',
       permissionsMode: 'CUSTOM',
       permissions: ['dashboard:read'],
@@ -428,7 +431,7 @@ test('logout revokes the current session token', async () => {
 test('a suspended account cannot use an existing token', async () => {
   const admin = await loginAdmin(ctx);
   const email = `suspend-${Date.now()}@transitsync.edu.np`;
-  insertUser(ctx, { email, password: STAFF_PASSWORD, fullName: 'Suspend Me', roleKey: ROLE_KEYS.ATTENDANT });
+  await insertUser(ctx, { email, password: STAFF_PASSWORD, fullName: 'Suspend Me', roleKey: ROLE_KEYS.ATTENDANT });
 
   const session = await login(ctx, email, STAFF_PASSWORD);
   assert.equal((await call(ctx, 'GET', '/api/dashboard', { token: session.token })).status, 200);
@@ -453,7 +456,7 @@ test('the last active System Administrator cannot be demoted or deleted', async 
 
   const demote = await call(ctx, 'PATCH', `/api/users/${myId}`, {
     token: admin.token,
-    body: { roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT) },
+    body: { roleId: await roleIdOf(ctx, ROLE_KEYS.ATTENDANT) },
   });
   assert.equal(demote.status, 400);
   assert.match(demote.body.error.message, /at least one active System Administrator/i);

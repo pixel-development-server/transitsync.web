@@ -1,7 +1,5 @@
 import { ALL_PERMISSIONS } from '../db/permissions.js';
 
-const TRUE = 1;
-
 /**
  * Effective permissions for one user.
  *
@@ -21,38 +19,36 @@ const TRUE = 1;
  * and System Administrator (Level 100) always hold every permission, even if
  * the catalogue grows after the role was granted.
  */
-export function resolvePermissions(db, user) {
+export async function resolvePermissions(db, user) {
   if (!user) return new Set();
 
   const role = user.role_key
-    ? db.prepare('SELECT r.id, r.key, r.level FROM roles r WHERE r.key = ?').get(user.role_key)
+    ? await db.get('SELECT r.id, r.key, r.level FROM roles r WHERE r.key = ?', user.role_key)
     : null;
 
   if (role?.key === 'system_admin' || role?.key === 'super_admin') {
     return new Set(ALL_PERMISSIONS);
   }
 
-  const overrides = db
-    .prepare(
-      `SELECT p.key, up.effect
-         FROM user_permissions up
-         JOIN permissions p ON p.id = up.permission_id
-        WHERE up.user_id = ?`,
-    )
-    .all(user.id);
+  const overrides = await db.all(
+    `SELECT p.key, up.effect
+       FROM user_permissions up
+       JOIN permissions p ON p.id = up.permission_id
+      WHERE up.user_id = ?`,
+    user.id,
+  );
 
   const isCustom = user.permissions_mode === 'CUSTOM';
 
   // CUSTOM starts empty so only the explicit checklist applies.
   const granted = new Set();
   if (!isCustom && role) {
-    for (const row of db
-      .prepare(
-        `SELECT p.key FROM role_permissions rp
-           JOIN permissions p ON p.id = rp.permission_id
-          WHERE rp.role_id = ?`,
-      )
-      .all(role.id)) {
+    for (const row of await db.all(
+      `SELECT p.key FROM role_permissions rp
+         JOIN permissions p ON p.id = rp.permission_id
+        WHERE rp.role_id = ?`,
+      role.id,
+    )) {
       granted.add(row.key);
     }
   }
@@ -66,20 +62,19 @@ export function resolvePermissions(db, user) {
 }
 
 /** Load a user row plus everything needed for permission resolution. */
-export function loadUserForAuth(db, userId) {
-  const user = db
-    .prepare(
-      `SELECT u.*, r.key AS role_key, r.name AS role_name, r.level AS role_level,
-              i.name AS institution_name
-         FROM users u
-         LEFT JOIN roles r ON r.id = u.role_id
-         LEFT JOIN institutions i ON i.id = u.tenant_id
-        WHERE u.id = ?`,
-    )
-    .get(userId);
+export async function loadUserForAuth(db, userId) {
+  const user = await db.get(
+    `SELECT u.*, r.key AS role_key, r.name AS role_name, r.level AS role_level,
+            i.name AS institution_name
+       FROM users u
+       LEFT JOIN roles r ON r.id = u.role_id
+       LEFT JOIN institutions i ON i.id = u.tenant_id
+      WHERE u.id = ?`,
+    userId,
+  );
 
   if (!user) return null;
-  return { ...user, permissions: [...resolvePermissions(db, user)] };
+  return { ...user, permissions: [...await resolvePermissions(db, user)] };
 }
 
 export function hasPermission(user, permission) {
@@ -106,79 +101,77 @@ export function requiresPasswordChange(user) {
 }
 
 /** Replace a user's explicit overrides with a new set. */
-export function setUserPermissions(db, userId, permissions, { mode = 'CUSTOM', grantedBy = null } = {}) {
+export async function setUserPermissions(db, userId, permissions, { mode = 'CUSTOM', grantedBy = null } = {}) {
   const valid = new Set(ALL_PERMISSIONS);
   const cleaned = [...new Set(permissions.filter((key) => valid.has(key)))];
 
-  db.transaction(() => {
-    db.prepare('DELETE FROM user_permissions WHERE user_id = ?').run(userId);
+  await db.transaction(async () => {
+    await db.run('DELETE FROM user_permissions WHERE user_id = ?', userId);
     const ids = new Map(
-      db.prepare('SELECT id, key FROM permissions').all().map((row) => [row.key, row.id]),
-    );
-    const insert = db.prepare(
-      `INSERT OR REPLACE INTO user_permissions (user_id, permission_id, effect, granted_by, granted_at)
-       VALUES (?, ?, 'GRANT', ?, datetime('now'))`,
+      (await db.all('SELECT id, `key` FROM permissions')).map((row) => [row.key, row.id]),
     );
     for (const key of cleaned) {
       const id = ids.get(key);
-      if (id) insert.run(userId, id, grantedBy);
+      if (id) {
+        await db.run(
+          `REPLACE INTO user_permissions (user_id, permission_id, effect, granted_by, granted_at)
+           VALUES (?, ?, 'GRANT', ?, NOW())`,
+          userId, id, grantedBy,
+        );
+      }
     }
-    db.prepare('UPDATE users SET permissions_mode = ?, updated_at = datetime(\'now\') WHERE id = ?').run(
-      mode,
-      userId,
-    );
+    await db.run('UPDATE users SET permissions_mode = ?, updated_at = NOW() WHERE id = ?', mode, userId);
   });
 
   return cleaned;
 }
 
 /** Save a role's permission set (role_permissions). */
-export function setRolePermissions(db, roleId, permissions) {
+export async function setRolePermissions(db, roleId, permissions) {
   const valid = new Set(ALL_PERMISSIONS);
   const cleaned = [...new Set(permissions.filter((key) => valid.has(key)))];
 
-  db.transaction(() => {
-    db.prepare('DELETE FROM role_permissions WHERE role_id = ?').run(roleId);
+  await db.transaction(async () => {
+    await db.run('DELETE FROM role_permissions WHERE role_id = ?', roleId);
     const ids = new Map(
-      db.prepare('SELECT id, key FROM permissions').all().map((row) => [row.key, row.id]),
-    );
-    const insert = db.prepare(
-      `INSERT OR IGNORE INTO role_permissions (role_id, permission_id, granted_at)
-       VALUES (?, ?, datetime('now'))`,
+      (await db.all('SELECT id, `key` FROM permissions')).map((row) => [row.key, row.id]),
     );
     for (const key of cleaned) {
       const id = ids.get(key);
-      if (id) insert.run(roleId, id);
+      if (id) {
+        await db.run(
+          `INSERT IGNORE INTO role_permissions (role_id, permission_id, granted_at)
+           VALUES (?, ?, NOW())`,
+          roleId, id,
+        );
+      }
     }
   });
 
   return cleaned;
 }
 
-export function getRolePermissions(db, roleKey) {
-  return db
-    .prepare(
-      `SELECT p.key FROM role_permissions rp
-         JOIN permissions p ON p.id = rp.permission_id
-         JOIN roles r       ON r.id = rp.role_id
-        WHERE r.key = ?`,
-    )
-    .all(roleKey)
-    .map((row) => row.key);
+export async function getRolePermissions(db, roleKey) {
+  const rows = await db.all(
+    `SELECT p.key FROM role_permissions rp
+       JOIN permissions p ON p.id = rp.permission_id
+       JOIN roles r       ON r.id = rp.role_id
+      WHERE r.key = ?`,
+    roleKey,
+  );
+  return rows.map((row) => row.key);
 }
 
 /** Full matrix for the User Management UI: catalogue + every role's grants. */
-export function permissionMatrix(db) {
-  const roles = db.prepare('SELECT id, key, name, description, level, is_system FROM roles ORDER BY level DESC').all();
+export async function permissionMatrix(db) {
+  const roles = await db.all('SELECT id, `key`, name, description, level, is_system FROM roles ORDER BY level DESC');
   const grants = new Map();
-  for (const row of db
-    .prepare(
-      `SELECT r.key AS role_key, p.key AS permission_key
-         FROM role_permissions rp
-         JOIN permissions p ON p.id = rp.permission_id
-         JOIN roles r       ON r.id = rp.role_id`,
-    )
-    .all()) {
+  for (const row of await db.all(
+    `SELECT r.key AS role_key, p.key AS permission_key
+       FROM role_permissions rp
+       JOIN permissions p ON p.id = rp.permission_id
+       JOIN roles r       ON r.id = rp.role_id`,
+  )) {
     if (!grants.has(row.role_key)) grants.set(row.role_key, new Set());
     grants.get(row.role_key).add(row.permission_key);
   }

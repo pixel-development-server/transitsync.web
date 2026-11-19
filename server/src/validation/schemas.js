@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { PORTAL_KEYS } from '../db/permissions.js';
+
 const trimmed = (min = 1, max = 255) => z.string().trim().min(min).max(max);
 const optionalText = (max = 500) => z.string().trim().max(max).nullable().optional();
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD');
@@ -30,13 +32,41 @@ const emptyToNull = (schema) =>
 const invalidEmailMessage =
   "Please enter a valid email address containing '@' (e.g., student@iic.edu.np)";
 
+/**
+ * Staff-side student registry. The transport office types roster rows by hand,
+ * so a malformed address is reported with the exact terse label the form shows
+ * inline next to the field, rather than the student-facing guidance above.
+ */
+const INVALID_MAIL_MESSAGE = 'Invalid mail';
+
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
+/** Google Identity Services credential exchange. */
+export const googleAuthSchema = z.object({
+  credential: z.string().trim().min(10, 'Google did not return a sign-in credential.'),
+  portalType: z.enum([PORTAL_KEYS.STAFF, PORTAL_KEYS.STUDENT]).optional().default(PORTAL_KEYS.STAFF),
+  rememberMe: z.boolean().optional().default(false),
+  deviceFingerprint: z.string().trim().min(8).max(200).optional(),
+});
+
 export const loginSchema = z.object({
   email: z.string().trim().toLowerCase().email('Enter a valid email address'),
   password: z.string().min(1, 'Password is required'),
   remember: z.boolean().optional().default(false),
+  // The sign-in form posts `rememberMe`; older callers posted `remember`. Both
+  // are accepted and the route resolves them to one boolean. Keeping `remember`
+  // with its default means a request that omits both still parses as false.
+  rememberMe: z.boolean().optional(),
+  // Stable per-device identifier minted in the browser and kept in
+  // localStorage. Presence-with-`rememberMe` is what extends a session to the
+  // recognised-device TTL; an unknown value registers a new device.
+  deviceFingerprint: z.string().trim().min(8).max(200).optional(),
+  // Which portal the credential is presented at. Defaults to the staff console
+  // so existing callers keep working: a rider account must explicitly ask for
+  // the student portal rather than being admitted by default, and the endpoint
+  // then refuses any credential presented at the wrong portal.
+  portalType: z.enum([PORTAL_KEYS.STAFF, PORTAL_KEYS.STUDENT]).optional().default(PORTAL_KEYS.STAFF),
 });
 
 /** Step 1 of the two-step sign-in: is this a real account, and does it have a password? */
@@ -105,6 +135,28 @@ export const changePasswordSchema = z
   .refine((data) => data.newPassword !== data.currentPassword, {
     message: 'New password must be different from the current one',
     path: ['newPassword'],
+  });
+
+/**
+ * Forced-rotation handoff: sign-in was halted (`requireNewPassword`) and the
+ * caller now sets a fresh password.
+ *
+ * `resetToken` is the short-lived proof minted by `/auth/login`; `email` rides
+ * along as the identifier the operator typed and is cross-checked against the
+ * token's subject server-side. There is deliberately no `currentPassword` here —
+ * the whole point of a forced reset is that the old credential must not be
+ * reusable, and the identity was already proven at the login step.
+ */
+export const setNewPasswordSchema = z
+  .object({
+    email: z.string().trim().toLowerCase().email('Enter a valid email address'),
+    resetToken: z.string().min(1, 'A password-reset session is required'),
+    newPassword: z.string().min(1, 'New password is required'),
+    confirmPassword: z.string(),
+  })
+  .refine((data) => data.newPassword === data.confirmPassword, {
+    message: 'Passwords do not match',
+    path: ['confirmPassword'],
   });
 
 export const updateProfileSchema = z.object({
@@ -206,7 +258,7 @@ export const rolePermissionsSchema = z.object({
 const studentBody = {
   fullName: trimmed(2, 120),
   collegeId: trimmed(3, 40).regex(/^[A-Za-z0-9\-_/]+$/, 'Only letters, digits, dashes, slashes and underscores'),
-  email: emptyToNull(z.string().trim().toLowerCase().email(invalidEmailMessage)).optional(),
+  email: emptyToNull(z.string().trim().toLowerCase().email(INVALID_MAIL_MESSAGE)).optional(),
   phone: optionalText(40),
   faculty: optionalText(120),
   program: optionalText(120),
@@ -251,6 +303,40 @@ export const issueCardSchema = z.object({
 export const revokeCardSchema = z.object({
   reason: z.enum(['cancelled', 'lost', 'blocked', 'damaged', 'graduated', 'other']).optional().default('cancelled'),
   note: z.string().trim().max(500).optional(),
+});
+
+// ---------------------------------------------------------------------------
+// Student bookings — a rider's daily route/bus selection
+// ---------------------------------------------------------------------------
+/**
+ * A rider books exactly one trip per calendar day. `routeId`/`busId` are the
+ * chosen service; both are optional so a rider can express "I am travelling"
+ * and let the operations desk assign a vehicle.
+ */
+export const createBookingSchema = z.object({
+  travelDate: isoDate,
+  routeId: idParam.nullable().optional(),
+  busId: idParam.nullable().optional(),
+  notes: optionalText(400),
+});
+
+/** Partial re-book used to change the route/bus of an existing day. */
+export const updateBookingSchema = z.object({
+  routeId: idParam.nullable().optional(),
+  busId: idParam.nullable().optional(),
+  notes: optionalText(400),
+});
+
+/** Staff-side filter over the booking ledger. */
+export const bookingQuerySchema = z.object({
+  from: isoDate.optional(),
+  to: isoDate.optional(),
+  date: isoDate.optional(),
+  status: z.enum(['BOOKED', 'CANCELLED', 'COMPLETED', 'all']).optional(),
+  search: z.string().trim().max(120).optional(),
+  page: z.coerce.number().int().positive().optional(),
+  limit: z.coerce.number().int().positive().max(500).optional(),
+  tenantId: platformTenantId,
 });
 
 // ---------------------------------------------------------------------------
@@ -460,11 +546,23 @@ const collegeCode = z
   .toLowerCase()
   .regex(/^[a-z0-9][a-z0-9-]{1,31}$/, 'Use 2–32 lowercase letters, digits or hyphens.');
 
+export /** Institutional email domain authorised for Google Sign-In into a campus. */
+const collegeDomain = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(
+    /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/,
+    'Enter a domain such as iic.edu.np',
+  );
+const collegeDomains = z.array(collegeDomain).max(12).optional();
+
 export const collegeCreateSchema = z.object({
   name: trimmed(2, 160),
   code: collegeCode,
   adminEmail: z.string().trim().toLowerCase().email('Enter a valid email address.').max(200),
   adminName: trimmed(2, 160).optional(),
+  emailDomains: collegeDomains,
 });
 
 export const collegeStatusSchema = z.object({
@@ -477,8 +575,9 @@ export const collegeUpdateSchema = z
     name: trimmed(2, 160).optional(),
     code: collegeCode.optional(),
     adminEmail: z.string().trim().toLowerCase().email(invalidEmailMessage).max(200).optional(),
+    emailDomains: collegeDomains,
   })
-  .refine((data) => data.name || data.code || data.adminEmail, {
+  .refine((data) => data.name || data.code || data.adminEmail || data.emailDomains !== undefined, {
     message: 'Provide at least one field to update.',
   });
 
@@ -496,6 +595,7 @@ export const sessionIdSchema = z.object({ id: z.string().trim().min(8).max(64) }
 export const backupFileSchema = z.object({ file: z.string().regex(/^[\w.-]+$/, 'Invalid file name') });
 
 export const schemas = {
+  googleAuthSchema,
   loginSchema,
   checkEmailSchema,
   setFirstPasswordSchema,
@@ -503,6 +603,7 @@ export const schemas = {
   studentRegisterSchema,
   setupSchema,
   changePasswordSchema,
+  setNewPasswordSchema,
   updateProfileSchema,
   changeEmailSchema,
   twoFactorSetupSchema,
@@ -518,6 +619,9 @@ export const schemas = {
   createStudentSchema,
   updateStudentSchema,
   studentQuerySchema,
+  createBookingSchema,
+  updateBookingSchema,
+  bookingQuerySchema,
   createBusSchema,
   updateBusSchema,
   createRouteSchema,

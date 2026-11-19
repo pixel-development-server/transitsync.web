@@ -181,9 +181,9 @@ export default function SecuritySettings() {
         <p className="mt-1 text-[0.72rem] leading-relaxed text-amber-200/80">
           Each code works once if you lose your device. They are shown only this once.
         </p>
-        <div className="mt-2.5 grid grid-cols-2 gap-1.5 font-mono text-[0.82rem] text-mist-100 sm:grid-cols-2">
+        <div className="mt-2.5 grid grid-cols-1 gap-1.5 font-mono text-[0.78rem] text-mist-100 sm:grid-cols-2 sm:text-[0.82rem]">
           {recoveryCodes.map((entry) => (
-            <span key={entry} className="rounded bg-black/25 px-2 py-1 text-center">
+            <span key={entry} className="min-w-0 break-all rounded bg-black/25 px-2 py-1 text-center">
               {entry}
             </span>
           ))}

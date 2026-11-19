@@ -88,22 +88,21 @@ router.get(
     const direction = req.query.order === 'asc' ? 'ASC' : 'DESC';
     const orderBy = SORT_MAP[req.query.sort] ?? 'e.scan_time';
 
-    const rows = db
-      .prepare(`${SELECT_SCAN} ${where} ORDER BY ${orderBy} ${direction}, e.id DESC LIMIT ? OFFSET ?`)
-      .all(...params, limit, offset);
-    const total = db
-      .prepare(`SELECT COUNT(*) AS n FROM scan_events e LEFT JOIN students s ON s.id = e.student_id LEFT JOIN buses b ON b.id = e.bus_id LEFT JOIN routes r ON r.id = e.route_id ${where}`)
-      .get(...params).n;
+    // mysql2 prepared statements reject number-typed LIMIT/OFFSET params (ER_WRONG_ARGUMENTS).
+    const rows = await db.all(
+      `${SELECT_SCAN} ${where} ORDER BY ${orderBy} ${direction}, e.id DESC LIMIT ? OFFSET ?`,
+      ...params, Number(limit), Number(offset),
+    );
+    const total = (await db.get(`SELECT COUNT(*) AS n FROM scan_events e LEFT JOIN students s ON s.id = e.student_id LEFT JOIN buses b ON b.id = e.bus_id LEFT JOIN routes r ON r.id = e.route_id ${where}`, ...params)).n;
 
-    const counts = db
-      .prepare(
-        `SELECT e.outcome, COUNT(*) AS n FROM scan_events e
-           LEFT JOIN students s ON s.id = e.student_id
-           LEFT JOIN buses b ON b.id = e.bus_id
-           LEFT JOIN routes r ON r.id = e.route_id
-         ${where} GROUP BY e.outcome`,
-      )
-      .all(...params)
+    const counts = (await db.all(
+      `SELECT e.outcome, COUNT(*) AS n FROM scan_events e
+         LEFT JOIN students s ON s.id = e.student_id
+         LEFT JOIN buses b ON b.id = e.bus_id
+         LEFT JOIN routes r ON r.id = e.route_id
+       ${where} GROUP BY e.outcome`,
+      ...params,
+    ))
       .reduce((acc, row) => ({ ...acc, [row.outcome]: row.n }), {});
 
     res.json({
@@ -140,58 +139,54 @@ router.get(
     }
     const where = clauses.length ? `AND ${clauses.join(' AND ')}` : '';
 
-    const daily = db
-      .prepare(
-        `SELECT date(e.scan_time) AS day,
-                SUM(CASE WHEN e.direction = 'BOARD' THEN 1 ELSE 0 END) AS boards,
-                SUM(CASE WHEN e.direction = 'DEBOARD' THEN 1 ELSE 0 END) AS alights,
-                COUNT(*) AS total,
-                MAX(e.occupancy_after) AS peak
-           FROM scan_events e
-          WHERE e.outcome = 'VALID' AND date(e.scan_time) >= date('now', ?)
-            ${where}
-          GROUP BY day ORDER BY day`,
-      )
-      .all(`-${days} days`, ...params);
+    const daily = await db.all(
+      `SELECT DATE(e.scan_time) AS day,
+              SUM(CASE WHEN e.direction = 'BOARD' THEN 1 ELSE 0 END) AS boards,
+              SUM(CASE WHEN e.direction = 'DEBOARD' THEN 1 ELSE 0 END) AS alights,
+              COUNT(*) AS total,
+              MAX(e.occupancy_after) AS peak
+         FROM scan_events e
+        WHERE e.outcome = 'VALID' AND DATE(e.scan_time) >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+          ${where}
+        GROUP BY day ORDER BY day`,
+      Number(days), ...params,
+    );
 
-    const byBus = db
-      .prepare(
-        `SELECT b.id AS bus_id, b.code AS bus_code, b.name AS bus_name, b.seat_capacity,
-                COUNT(CASE WHEN e.direction = 'BOARD' THEN 1 END) AS boards,
-                MAX(e.occupancy_after) AS peak,
-                ROUND(AVG(CASE WHEN e.direction = 'BOARD' THEN 1 END), 1) AS avg_daily_boards
-           FROM scan_events e JOIN buses b ON b.id = e.bus_id
-          WHERE e.outcome = 'VALID' AND date(e.scan_time) >= date('now', ?)
-            ${where}
-          GROUP BY b.id ORDER BY boards DESC`,
-      )
-      .all(`-${days} days`, ...params);
+    const byBus = await db.all(
+      `SELECT b.id AS bus_id, b.code AS bus_code, b.name AS bus_name, b.seat_capacity,
+              COUNT(CASE WHEN e.direction = 'BOARD' THEN 1 END) AS boards,
+              MAX(e.occupancy_after) AS peak,
+              ROUND(AVG(CASE WHEN e.direction = 'BOARD' THEN 1 END), 1) AS avg_daily_boards
+         FROM scan_events e JOIN buses b ON b.id = e.bus_id
+        WHERE e.outcome = 'VALID' AND DATE(e.scan_time) >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+          ${where}
+        GROUP BY b.id ORDER BY boards DESC`,
+      Number(days), ...params,
+    );
 
-    const byRoute = db
-      .prepare(
-        `SELECT r.id AS route_id, r.code AS route_code, r.name AS route_name, r.color,
-                COUNT(CASE WHEN e.direction = 'BOARD' THEN 1 END) AS boards,
-                MAX(e.occupancy_after) AS peak
-           FROM scan_events e JOIN routes r ON r.id = e.route_id
-          WHERE e.outcome = 'VALID' AND date(e.scan_time) >= date('now', ?)
-            ${where}
-          GROUP BY r.id ORDER BY boards DESC LIMIT 12`,
-      )
-      .all(`-${days} days`, ...params);
+    const byRoute = await db.all(
+      `SELECT r.id AS route_id, r.code AS route_code, r.name AS route_name, r.color,
+              COUNT(CASE WHEN e.direction = 'BOARD' THEN 1 END) AS boards,
+              MAX(e.occupancy_after) AS peak
+         FROM scan_events e JOIN routes r ON r.id = e.route_id
+        WHERE e.outcome = 'VALID' AND DATE(e.scan_time) >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+          ${where}
+        GROUP BY r.id ORDER BY boards DESC LIMIT 12`,
+      Number(days), ...params,
+    );
 
-    const hourOfDay = db
-      .prepare(
-        `SELECT strftime('%H', e.scan_time) AS hour,
-                SUM(CASE WHEN e.direction = 'BOARD' THEN 1 ELSE 0 END) AS boards,
-                COUNT(*) AS total
-           FROM scan_events e
-          WHERE e.outcome = 'VALID' AND date(e.scan_time) >= date('now', ?)
-            ${where}
-          GROUP BY hour ORDER BY hour`,
-      )
-      .all(`-${days} days`, ...params);
+    const hourOfDay = await db.all(
+      `SELECT DATE_FORMAT(e.scan_time, '%H') AS hour,
+              SUM(CASE WHEN e.direction = 'BOARD' THEN 1 ELSE 0 END) AS boards,
+              COUNT(*) AS total
+         FROM scan_events e
+        WHERE e.outcome = 'VALID' AND DATE(e.scan_time) >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+          ${where}
+        GROUP BY hour ORDER BY hour`,
+      Number(days), ...params,
+    );
 
-    const totalCapacity = db.prepare("SELECT COALESCE(SUM(seat_capacity), 0) AS n FROM buses WHERE status = 'ACTIVE'").get().n;
+    const totalCapacity = (await db.get("SELECT COALESCE(SUM(seat_capacity), 0) AS n FROM buses WHERE status = 'ACTIVE'")).n;
     const peakOverall = daily.reduce((max, row) => Math.max(max, row.peak ?? 0), 0);
 
     res.json({
@@ -242,32 +237,26 @@ router.get(
   requirePermission('attendance:read'),
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const today = db
-      .prepare(
-        `SELECT COUNT(*) AS total,
-                SUM(CASE WHEN outcome = 'VALID' THEN 1 ELSE 0 END) AS valid,
-                SUM(CASE WHEN outcome <> 'VALID' THEN 1 ELSE 0 END) AS rejected,
-                SUM(CASE WHEN direction = 'BOARD' THEN 1 ELSE 0 END) AS boards
-           FROM scan_events WHERE date(scan_time) = date('now')`,
-      )
-      .get();
+    const today = await db.get(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN outcome = 'VALID' THEN 1 ELSE 0 END) AS valid,
+              SUM(CASE WHEN outcome <> 'VALID' THEN 1 ELSE 0 END) AS rejected,
+              SUM(CASE WHEN direction = 'BOARD' THEN 1 ELSE 0 END) AS boards
+         FROM scan_events WHERE DATE(scan_time) = CURDATE()`,
+    );
 
-    const week = db
-      .prepare(
-        `SELECT date(scan_time) AS day, COUNT(*) AS total
-           FROM scan_events WHERE scan_time >= datetime('now', '-6 days')
-          GROUP BY day ORDER BY day`,
-      )
-      .all();
+    const week = await db.all(
+      `SELECT DATE(scan_time) AS day, COUNT(*) AS total
+         FROM scan_events WHERE scan_time >= DATE_SUB(NOW(), INTERVAL 6 DAY)
+        GROUP BY day ORDER BY day`,
+    );
 
-    const topStudents = db
-      .prepare(
-        `SELECT s.id, s.full_name, s.college_id, COUNT(*) AS trips
-           FROM scan_events e JOIN students s ON s.id = e.student_id
-          WHERE e.outcome = 'VALID' AND e.scan_time >= datetime('now', '-29 days')
-          GROUP BY s.id ORDER BY trips DESC LIMIT 10`,
-      )
-      .all();
+    const topStudents = await db.all(
+      `SELECT s.id, s.full_name, s.college_id, COUNT(*) AS trips
+         FROM scan_events e JOIN students s ON s.id = e.student_id
+        WHERE e.outcome = 'VALID' AND e.scan_time >= DATE_SUB(NOW(), INTERVAL 29 DAY)
+        GROUP BY s.id ORDER BY trips DESC LIMIT 10`,
+    );
 
     res.json({
       success: true,
@@ -301,9 +290,8 @@ const EXPORT_COLUMNS = [
 
 function fetchExportRows(db, query, limit = 5000) {
   const { where, params } = buildFilters(query);
-  return db
-    .prepare(`${SELECT_SCAN} ${where} ORDER BY e.scan_time DESC LIMIT ?`)
-    .all(...params, limit);
+  // mysql2 prepared statements reject number-typed LIMIT params (ER_WRONG_ARGUMENTS).
+  return db.all(`${SELECT_SCAN} ${where} ORDER BY e.scan_time DESC LIMIT ?`, ...params, Number(limit));
 }
 
 router.get(
@@ -313,11 +301,11 @@ router.get(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const format = req.query.format ?? 'csv';
-    const rows = fetchExportRows(db, req.query);
+    const rows = await fetchExportRows(db, req.query);
     const shaped = rows.map(shapeScan);
 
     const institution =
-      db.prepare("SELECT value FROM system_meta WHERE key = 'institution_name'").get()?.value ?? 'TransitSync';
+      (await db.get("SELECT value FROM system_meta WHERE `key` = 'institution_name'"))?.value ?? 'TransitSync';
 
     recordAudit(
       fromRequest(req, 'attendance.export', {

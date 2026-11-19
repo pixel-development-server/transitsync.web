@@ -5,16 +5,21 @@ import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
-import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 
 import config from './config/env.js';
 import apiRoutes from './routes/index.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { hub } from './services/realtime.js';
+import { drainAuditWrites } from './services/audit.js';
+import { requestLogger } from '../logger.js';
+
+/** Hard ceiling on how long a response may wait for pending audit writes. */
+const AUDIT_DRAIN_CAP_MS = 2000;
 
 /**
- * True when `origin` addresses this very server, judged by Host.
+ * True when `origin` addresses this very server, judged by Host (or the public
+ * Host forwarded by an edge proxy).
  *
  * Comparing host rather than protocol keeps it correct behind a TLS-terminating
  * proxy, where `req.protocol` is http but the browser legitimately used https.
@@ -22,10 +27,15 @@ import { hub } from './services/realtime.js';
  * localhost:8080 and localhost:5173 does not.
  */
 function isSelfOrigin(req, origin) {
-  const host = req.headers.host;
-  if (!host) return false;
+  // An edge proxy may forward to a different internal hostname (e.g. a Worker
+  // fetching origin.transitsync.me for traffic the browser sent to
+  // transitsync.me). Accept either the direct Host or the original public host
+  // so same-origin POSTs still pass the CORS self-check.
+  const hosts = [req.headers.host, req.headers['x-forwarded-host']?.split(',')[0]?.trim()]
+    .filter(Boolean);
+  if (hosts.length === 0) return false;
   try {
-    return new URL(origin).host === host;
+    return hosts.includes(new URL(origin).host);
   } catch {
     // "null" (sandboxed iframe / file://) and anything unparseable: not us.
     return false;
@@ -39,16 +49,32 @@ export function createApp() {
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
 
+  // Structured HTTP activity log. Mounted ahead of everything else — before
+  // CORS and the rate limiter — so *every* request is captured, including ones
+  // that are refused before they ever reach a route. Each request becomes one
+  // aligned, colour-coded NPT row on the terminal and one plain row in
+  // logs/server_activity.log; `/api/health` is recorded at DEBUG so a poll
+  // every few seconds cannot drown out real traffic.
+  app.use(requestLogger());
+
+  // Google Identity Services origins are only allowed when the feature is on.
+  // A Google-free deployment advertises a CSP with no Google host at all.
+  const googleOrigins = config.google.enabled ? ['https://accounts.google.com'] : [];
+
   app.use(
     helmet({
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'"],
-          scriptSrc: ["'self'"],
+          // Google Identity Services loads its bootstrap from accounts.google.com
+          // and verifies the ID token in this process. Only the GIS script and
+          // its popup frame are allowed; everything else stays same-origin.
+          scriptSrc: ["'self'", ...googleOrigins],
           // Tailwind and a handful of chart components rely on inline style attributes.
           styleSrc: ["'self'", "'unsafe-inline'"],
           imgSrc: ["'self'", 'data:', 'blob:'],
-          connectSrc: ["'self'"],
+          frameSrc: ["'self'", ...googleOrigins],
+          connectSrc: ["'self'", ...googleOrigins],
           fontSrc: ["'self'", 'data:'],
           objectSrc: ["'none'"],
           frameAncestors: ["'none'"],
@@ -106,7 +132,34 @@ export function createApp() {
   app.use(express.json({ limit: config.limits.bodyLimit }));
   app.use(express.urlencoded({ extended: true, limit: config.limits.bodyLimit }));
   app.use(cookieParser());
-  app.use(morgan(config.isProduction ? 'combined' : 'dev', { skip: (req) => req.path === '/api/health' }));
+
+  // Fire-and-forget audit writes must still be visible to a client that reads
+  // the trail immediately after the response that triggered them (the purge
+  // flow, CSV/PDF exports, …). Every Express response — JSON, error, streamed
+  // file — funnels through `res.end`, so hold it until the audit queue has
+  // drained: the database committed the row before the
+  // response by construction, and this restores that guarantee without
+  // `await` at ~50 call sites. The queue is already settled in the common
+  // case, so this costs one microtask.
+  app.use((_req, res, next) => {
+    const end = res.end;
+    res.end = function wrappedEnd(...args) {
+      // Normally settled already (one microtask); the 2s cap means a wedged
+      // audit INSERT can delay a response but never stall it forever.
+      const flushed = drainAuditWrites().catch(() => {});
+      let timer;
+      const bounded = Promise.race([
+        flushed,
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, AUDIT_DRAIN_CAP_MS);
+          timer.unref?.();
+        }),
+      ]).finally(() => clearTimeout(timer));
+      bounded.then(() => end.apply(this, args));
+      return res;
+    };
+    next();
+  });
 
   app.use(
     '/api',
@@ -146,14 +199,22 @@ function mountClient(app) {
   const built = fs.existsSync(indexFile);
 
   if (built) {
-    // Hashed assets are immutable; index.html must always be revalidated.
+    // Only the content-hashed bundle under `assets/` may be cached forever: its
+    // name changes whenever its bytes do. Everything else in dist/ keeps a
+    // stable name — busicon.png, manifest.webmanifest, theme.js, icons/ — so it
+    // MUST be revalidated. Caching those for a year would pin a replaced asset
+    // (a new busicon, say) in every browser long after the file on disk changed.
     app.use(
       express.static(distDir, {
         index: false,
-        maxAge: '1y',
         setHeaders(res, filePath) {
+          const top = path.relative(distDir, filePath).split(path.sep)[0];
           if (filePath.endsWith('index.html')) {
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          } else if (top === 'assets') {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          } else {
+            res.setHeader('Cache-Control', 'no-cache');
           }
         },
       }),
@@ -168,7 +229,12 @@ function mountClient(app) {
       return res.status(404).type('text/plain').send(`Not found: ${req.path}`);
     }
 
-    if (built) return res.sendFile(indexFile);
+    // The entry document must never be cached: it names the content-hashed
+    // bundle, so a stale copy would keep loading the previous build.
+    if (built) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      return res.sendFile(indexFile);
+    }
 
     // Client has not been built yet — explain instead of serving a blank page.
     return res

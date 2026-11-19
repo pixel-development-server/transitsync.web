@@ -73,7 +73,7 @@ test('no one can mint a System Administrator account', async () => {
     body: {
       email: `new-root-${Date.now()}@transitsync.edu.np`,
       fullName: 'New Root',
-      roleId: roleIdOf(ctx, ROLE_KEYS.SYSTEM_ADMIN),
+      roleId: await roleIdOf(ctx, ROLE_KEYS.SYSTEM_ADMIN),
       temporaryPassword: 'Root!2024x',
       forcePasswordChange: false,
     },
@@ -84,7 +84,7 @@ test('no one can mint a System Administrator account', async () => {
 
 test('even a System Administrator cannot modify another System Administrator', async () => {
   const admin = await loginAdmin(ctx);
-  const secondAdminId = insertUser(ctx, {
+  const secondAdminId = await insertUser(ctx, {
     email: 'second-root@transitsync.edu.np',
     password: 'Root2!2024x',
     fullName: 'Second Root',
@@ -237,7 +237,7 @@ test('a level-90 Administrator cannot modify accounts or roles at or above their
       body: {
         email: `admin90-${suffix}-${Date.now()}@transitsync.edu.np`,
         fullName: `Campus Admin ${suffix}`,
-        roleId: roleIdOf(ctx, ROLE_KEYS.ADMIN),
+        roleId: await roleIdOf(ctx, ROLE_KEYS.ADMIN),
         jobTitle: 'Administrator',
         department: 'Administration',
         temporaryPassword: 'Admin90!2024x',

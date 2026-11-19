@@ -14,33 +14,32 @@ export const NAV_SECTIONS = [
     label: 'Operations',
     items: [
       { to: '/', label: 'Dashboard', icon: 'dashboard', permission: 'dashboard:read', end: true },
-      { to: '/live', label: 'Live Monitor', icon: 'activity', permission: 'dashboard:read' },
+      { to: '/live-monitor', label: 'Live Monitor', icon: 'activity', permission: 'dashboard:read' },
     ],
   },
   {
     label: 'Records',
     items: [
-      { to: '/students', label: 'Students', icon: 'students', permission: 'students:read' },
-      { to: '/alerts', label: 'Alerts', icon: 'alerts', permission: 'alerts:read', badge: 'alerts' },
+      { to: '/students', label: 'Student Registry', icon: 'students', permission: 'students:read' },
     ],
   },
   {
     label: 'Fleet',
-    items: [{ to: '/fleet', label: 'Buses & Routes', icon: 'bus', permission: 'fleet:read' }],
+    items: [{ to: '/buses-routes', label: 'Buses & Routes', icon: 'bus', permission: 'fleet:read' }],
   },
   {
     label: 'Administration',
     items: [
-      { to: '/users', label: 'Users', icon: 'users', permission: 'users:read' },
-      { to: '/admin/student-accounts', label: 'Student Accounts', icon: 'students', permission: 'users:read' },
-      { to: '/roles', label: 'Roles & Permissions', icon: 'roles', permission: 'roles:read' },
-      { to: '/settings', label: 'Settings', icon: 'settings', permission: 'settings:read' },
+      { to: '/users', label: 'User Management', icon: 'users', permission: 'users:read' },
+      { to: '/student-accounts', label: 'Student Accounts', icon: 'students', permission: 'users:read' },
+      { to: '/settings', label: 'System Settings', icon: 'settings', permission: 'settings:read' },
     ],
   },
   {
     // Level 200 only. Gated on the role itself (`superAdmin`) rather than a
     // permission, because the System Administrator holds every permission and
-    // must NOT see the platform surface.
+    // must NOT see the platform surface. Campus staff therefore never see this
+    // category — TransitSync ships as a single-college console for staff.
     label: 'Platform Master',
     items: [
       { to: '/super-admin/colleges', label: 'College Management', icon: 'building', superAdmin: true },

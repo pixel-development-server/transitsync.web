@@ -54,32 +54,33 @@ function relayGuard(req, res, next) {
 }
 
 /** Map a reader `deviceId` (e.g. `BUS-01`) to a bus row. */
-function findBus(deviceId) {
+async function findBus(deviceId) {
   if (!deviceId) return null;
   const db = getDb();
   return (
-    db
-      .prepare(
+    (
+      await db.get(
         `SELECT b.*, r.code AS route_code, r.name AS route_name
            FROM buses b
            LEFT JOIN routes r ON r.id = b.current_route_id
           WHERE UPPER(b.code) = UPPER(?)`,
+        String(deviceId).trim(),
       )
-      .get(String(deviceId).trim()) ?? null
+    ) ?? null
   );
 }
 
-function handleEvent(event) {
+async function handleEvent(event) {
   const type = String(event?.type ?? '').trim().toUpperCase();
   const deviceId = event?.deviceId ? String(event.deviceId).trim() : null;
   const at = event?.timestamp ?? event?.ts ?? null;
-  const bus = findBus(deviceId);
+  const bus = await findBus(deviceId);
 
   if (type === 'CARD_TAP') {
     const uid = event?.uid ?? (typeof event?.payload === 'string' ? event.payload : null);
     if (!uid) throw badRequest('CARD_TAP requires a `uid`.');
 
-    const result = processTap({
+    const result = await processTap({
       rfidSerial: uid,
       busId: bus?.id ?? null,
       gate: deviceId ?? null,
@@ -105,7 +106,7 @@ function handleEvent(event) {
   }
 
   if (type === 'VISITOR_BUTTON') {
-    const visitor = recordVisitorPress({
+    const visitor = await recordVisitorPress({
       busId: bus?.id ?? null,
       routeId: bus?.current_route_id ?? null,
       deviceId,
@@ -138,7 +139,7 @@ router.post(
     // One bad event must never poison the rest of a burst.
     for (const event of events) {
       try {
-        results.push({ ok: true, ...handleEvent(event) });
+        results.push({ ok: true, ...(await handleEvent(event)) });
         processed += 1;
       } catch (error) {
         rejected += 1;

@@ -5,6 +5,7 @@ import { asyncHandler, validate, parsePagination, paginationMeta } from '../lib/
 import { conflict, notFound } from '../lib/errors.js';
 import { requirePermission } from '../middleware/requirePermission.js';
 import { requireAuth } from '../middleware/auth.js';
+import { operationalEventScope, assertEventRowVisible, assertCampusRowVisible } from '../lib/tenantScope.js';
 import { recordAudit, fromRequest } from '../services/audit.js';
 import { ALERT_TYPES, createManualAlert } from '../services/scanner.js';
 import hub from '../services/realtime.js';
@@ -68,8 +69,11 @@ router.get(
     const { status, severity, type, search, from } = req.query;
     const { limit, page, offset } = parsePagination(req.query, { defaultLimit: 25 });
 
-    const clauses = [];
-    const params = [];
+    // Campus isolation: own-campus events plus campus-neutral system rows;
+    // a platform principal must drill in with `?tenantId=`.
+    const scope = await operationalEventScope(db, req.user, req.query, 'a');
+    const clauses = [scope.clause];
+    const params = [...scope.params];
     if (status && status !== 'all') {
       clauses.push('a.status = ?');
       params.push(status);
@@ -93,8 +97,9 @@ router.get(
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-    const rows = db.prepare(`${SELECT_ALERT} ${where} ORDER BY a.id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset);
-    const total = db.prepare(`SELECT COUNT(*) AS n FROM alerts a LEFT JOIN students s ON s.id = a.student_id LEFT JOIN buses b ON b.id = a.bus_id ${where}`).get(...params).n;
+    // mysql2 prepared statements reject number-typed LIMIT/OFFSET params (ER_WRONG_ARGUMENTS).
+    const rows = await db.all(`${SELECT_ALERT} ${where} ORDER BY a.id DESC LIMIT ? OFFSET ?`, ...params, Number(limit), Number(offset));
+    const total = (await db.get(`SELECT COUNT(*) AS n FROM alerts a LEFT JOIN students s ON s.id = a.student_id LEFT JOIN buses b ON b.id = a.bus_id ${where}`, ...params)).n;
 
     res.json({
       success: true,
@@ -109,19 +114,16 @@ router.get(
   requirePermission('alerts:read'),
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const byStatus = db.prepare('SELECT status, COUNT(*) AS n FROM alerts GROUP BY status').all()
+    // Same campus rule as the list so the KPI chips always agree with it.
+    const scope = await operationalEventScope(db, req.user, req.query);
+    const scopeClause = `WHERE ${scope.clause}`;
+    const byStatus = (await db.all(`SELECT status, COUNT(*) AS n FROM alerts ${scopeClause} GROUP BY status`, ...scope.params))
       .reduce((acc, row) => ({ ...acc, [row.status]: row.n }), {});
-    const bySeverity = db
-      .prepare("SELECT severity, COUNT(*) AS n FROM alerts WHERE status IN ('OPEN','ACKNOWLEDGED') GROUP BY severity")
-      .all()
+    const bySeverity = (await db.all(`SELECT severity, COUNT(*) AS n FROM alerts WHERE status IN ('OPEN','ACKNOWLEDGED') AND ${scope.clause} GROUP BY severity`, ...scope.params))
       .reduce((acc, row) => ({ ...acc, [row.severity]: row.n }), {});
-    const byType = db
-      .prepare("SELECT type, COUNT(*) AS n FROM alerts WHERE status IN ('OPEN','ACKNOWLEDGED') GROUP BY type")
-      .all()
+    const byType = (await db.all(`SELECT type, COUNT(*) AS n FROM alerts WHERE status IN ('OPEN','ACKNOWLEDGED') AND ${scope.clause} GROUP BY type`, ...scope.params))
       .reduce((acc, row) => ({ ...acc, [row.type]: row.n }), {});
-    const last24h = db
-      .prepare("SELECT COUNT(*) AS n FROM alerts WHERE created_at >= datetime('now', '-1 day')")
-      .get().n;
+    const last24h = (await db.get(`SELECT COUNT(*) AS n FROM alerts WHERE created_at >= DATE_SUB(NOW(), INTERVAL 1 DAY) AND ${scope.clause}`, ...scope.params)).n;
 
     res.json({
       success: true,
@@ -144,8 +146,9 @@ router.get(
   validate(idSchema, 'params'),
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const row = db.prepare(`${SELECT_ALERT} WHERE a.id = ?`).get(Number(req.params.id));
+    const row = await db.get(`${SELECT_ALERT} WHERE a.id = ?`, Number(req.params.id));
     if (!row) throw notFound('Alert');
+    assertEventRowVisible(req.user, row, 'Alert');
     res.json({ success: true, data: { alert: shapeAlert(row) } });
   }),
 );
@@ -158,18 +161,20 @@ router.post(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const row = db.prepare('SELECT * FROM alerts WHERE id = ?').get(id);
+    const row = await db.get('SELECT * FROM alerts WHERE id = ?', id);
     if (!row) throw notFound('Alert');
+    assertEventRowVisible(req.user, row, 'Alert');
 
-    db.prepare(
+    await db.run(
       `UPDATE alerts SET status = 'ACKNOWLEDGED', acknowledged_by = ?,
-                         acknowledged_at = datetime('now'), updated_at = datetime('now')
+                         acknowledged_at = NOW(), updated_at = NOW()
         WHERE id = ?`,
-    ).run(req.user.id, id);
+      req.user.id, id,
+    );
 
     recordAudit(fromRequest(req, 'alert.acknowledge', { entity: 'alert', entityId: id }));
-    const updated = db.prepare(`${SELECT_ALERT} WHERE a.id = ?`).get(id);
-    hub.broadcast('alert', 'alert:update', { id, status: 'ACKNOWLEDGED' });
+    const updated = await db.get(`${SELECT_ALERT} WHERE a.id = ?`, id);
+    hub.broadcast('alert', 'alert:update', { id, status: 'ACKNOWLEDGED' }, updated.tenant_id ?? null);
     res.json({ success: true, data: { alert: shapeAlert(updated) } });
   }),
 );
@@ -195,19 +200,22 @@ router.post(
     const db = getDb();
     const { ids, status, note } = req.body;
     const placeholders = ids.map(() => '?').join(',');
+    // Scope the UPDATE itself: a campus principal can only ever clear rows it
+    // can see (own campus + system), and an un-scoped platform principal with
+    // no campus context clears nothing — the registry contract, on writes.
+    const scope = await operationalEventScope(db, req.user, req.query);
 
-    const result = db
-      .prepare(
-        `UPDATE alerts SET status = ?, resolved_by = ?, resolved_at = datetime('now'),
-                           resolution_note = ?, acknowledged_by = COALESCE(acknowledged_by, ?),
-                           acknowledged_at = COALESCE(acknowledged_at, datetime('now')),
-                           updated_at = datetime('now')
-          WHERE id IN (${placeholders})`,
-      )
-      .run(status, req.user.id, note ?? 'Bulk cleared from console', req.user.id, ...ids);
+    const result = await db.run(
+      `UPDATE alerts SET status = ?, resolved_by = ?, resolved_at = NOW(),
+                         resolution_note = ?, acknowledged_by = COALESCE(acknowledged_by, ?),
+                         acknowledged_at = COALESCE(acknowledged_at, NOW()),
+                         updated_at = NOW()
+        WHERE id IN (${placeholders}) AND ${scope.clause}`,
+      status, req.user.id, note ?? 'Bulk cleared from console', req.user.id, ...ids, ...scope.params,
+    );
 
     recordAudit(fromRequest(req, 'alert.bulk_resolve', { entity: 'alert', detail: { count: result.changes, status } }));
-    hub.broadcast('alert', 'alert:bulk', { ids, status, count: result.changes });
+    hub.broadcast('alert', 'alert:bulk', { ids, status, count: result.changes }, req.user.tenant_id ?? null);
     res.json({ success: true, data: { updated: result.changes, status } });
   }),
 );
@@ -221,22 +229,24 @@ router.post(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const row = db.prepare('SELECT * FROM alerts WHERE id = ?').get(id);
+    const row = await db.get('SELECT * FROM alerts WHERE id = ?', id);
     if (!row) throw notFound('Alert');
+    assertEventRowVisible(req.user, row, 'Alert');
 
     const status = req.body.status ?? 'RESOLVED';
 
-    db.prepare(
-      `UPDATE alerts SET status = ?, resolved_by = ?, resolved_at = datetime('now'),
+    await db.run(
+      `UPDATE alerts SET status = ?, resolved_by = ?, resolved_at = NOW(),
                          resolution_note = ?, acknowledged_by = COALESCE(acknowledged_by, ?),
-                         acknowledged_at = COALESCE(acknowledged_at, datetime('now')),
-                         updated_at = datetime('now')
+                         acknowledged_at = COALESCE(acknowledged_at, NOW()),
+                         updated_at = NOW()
         WHERE id = ?`,
-    ).run(status, req.user.id, req.body.note ?? null, req.user.id, id);
+      status, req.user.id, req.body.note ?? null, req.user.id, id,
+    );
 
     recordAudit(fromRequest(req, 'alert.resolve', { entity: 'alert', entityId: id, detail: { status, note: req.body.note ?? null } }));
-    const updated = db.prepare(`${SELECT_ALERT} WHERE a.id = ?`).get(id);
-    hub.broadcast('alert', 'alert:update', { id, status });
+    const updated = await db.get(`${SELECT_ALERT} WHERE a.id = ?`, id);
+    hub.broadcast('alert', 'alert:update', { id, status }, updated.tenant_id ?? null);
     res.json({ success: true, data: { alert: shapeAlert(updated) } });
   }),
 );
@@ -254,42 +264,52 @@ router.post(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const alert = db.prepare('SELECT * FROM alerts WHERE id = ?').get(id);
+    const alert = await db.get('SELECT * FROM alerts WHERE id = ?', id);
     if (!alert) throw notFound('Alert');
+    assertEventRowVisible(req.user, alert, 'Alert');
 
     const metadata = alert.metadata ? JSON.parse(alert.metadata) : {};
     const serial = String(metadata.serial ?? '').trim().toUpperCase();
     if (!serial) throw notFound('The tapped serial on this alert');
 
-    const student = db.prepare('SELECT * FROM students WHERE id = ?').get(Number(req.body.studentId));
+    const student = await db.get('SELECT * FROM students WHERE id = ?', Number(req.body.studentId));
     if (!student) throw notFound('Student');
+    // A campus operator may only ever bind their own campus's roster row —
+    // otherwise attaching a foreign student would leak their name into this
+    // campus's alert feed.
+    assertCampusRowVisible(req.user, student, 'Student');
 
-    const clash = db
-      .prepare('SELECT id, full_name FROM students WHERE UPPER(rfid_serial) = ? AND id <> ?')
-      .get(serial, student.id);
+    const clash = await db.get(
+      'SELECT id, full_name FROM students WHERE UPPER(rfid_serial) = ? AND id <> ?',
+      serial, student.id,
+    );
     if (clash) throw conflict(`RFID serial "${serial}" is already bound to ${clash.full_name}.`);
 
-    db.transaction(() => {
-      db.prepare(
+    await db.transaction(async () => {
+      await db.run(
         `UPDATE students SET rfid_serial = ?, card_status = 'ACTIVE', rfid_status = 'ACTIVE',
-                             card_issued_at = COALESCE(card_issued_at, datetime('now')),
-                             card_revoked_at = NULL, card_revoked_reason = NULL, updated_at = datetime('now')
+                             card_issued_at = COALESCE(card_issued_at, NOW()),
+                             card_revoked_at = NULL, card_revoked_reason = NULL, updated_at = NOW()
           WHERE id = ?`,
-      ).run(serial, student.id);
+        serial, student.id,
+      );
 
-      db.prepare(
-        `UPDATE alerts SET status = 'RESOLVED', resolved_by = ?, resolved_at = datetime('now'),
+      await db.run(
+        `UPDATE alerts SET status = 'RESOLVED', resolved_by = ?, resolved_at = NOW(),
                            resolution_note = ?, student_id = ?,
+                           tenant_id = COALESCE(tenant_id, ?),
                            acknowledged_by = COALESCE(acknowledged_by, ?),
-                           acknowledged_at = COALESCE(acknowledged_at, datetime('now')),
-                           updated_at = datetime('now')
+                           acknowledged_at = COALESCE(acknowledged_at, NOW()),
+                           updated_at = NOW()
           WHERE id = ?`,
-      ).run(req.user.id, `Card registered to ${student.full_name}`, student.id, req.user.id, id);
+        req.user.id, `Card registered to ${student.full_name}`, student.id,
+        student.tenant_id ?? null, req.user.id, id,
+      );
     });
 
     recordAudit(fromRequest(req, 'alert.register_card', { entity: 'alert', entityId: id, detail: { serial, studentId: student.id } }));
-    const updated = db.prepare(`${SELECT_ALERT} WHERE a.id = ?`).get(id);
-    hub.broadcast('alert', 'alert:update', { id, status: 'RESOLVED' });
+    const updated = await db.get(`${SELECT_ALERT} WHERE a.id = ?`, id);
+    hub.broadcast('alert', 'alert:update', { id, status: 'RESOLVED' }, updated.tenant_id ?? null);
     res.json({ success: true, data: { alert: shapeAlert(updated), studentId: student.id, rfidSerial: serial } });
   }),
 );
@@ -308,7 +328,25 @@ router.post(
     }),
   ),
   asyncHandler(async (req, res) => {
-    const alert = createManualAlert({ type: 'SYSTEM', ...req.body });
+    const db = getDb();
+    // Campus ownership: the referenced bus/route decides it (and must be
+    // visible to the caller), else the author's own campus. A platform
+    // principal without a campus reference raises a campus-neutral system row.
+    let tenantId = null;
+    if (req.body.busId) {
+      const bus = await db.get('SELECT * FROM buses WHERE id = ?', req.body.busId);
+      if (!bus) throw notFound('Bus');
+      assertCampusRowVisible(req.user, bus, 'Bus');
+      tenantId = bus.tenant_id ?? null;
+    } else if (req.body.routeId) {
+      const route = await db.get('SELECT * FROM routes WHERE id = ?', req.body.routeId);
+      if (!route) throw notFound('Route');
+      assertCampusRowVisible(req.user, route, 'Route');
+      tenantId = route.tenant_id ?? null;
+    }
+    if (tenantId == null) tenantId = req.user.tenant_id ?? null;
+
+    const alert = await createManualAlert({ type: 'SYSTEM', ...req.body, tenantId });
     recordAudit(fromRequest(req, 'alert.create', { entity: 'alert', entityId: alert.id }));
     res.status(201).json({ success: true, data: { alert: shapeAlert(alert) } });
   }),
@@ -321,11 +359,13 @@ router.delete(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    if (!db.prepare('SELECT id FROM alerts WHERE id = ?').get(id)) throw notFound('Alert');
+    const row = await db.get('SELECT * FROM alerts WHERE id = ?', id);
+    if (!row) throw notFound('Alert');
+    assertEventRowVisible(req.user, row, 'Alert');
 
-    db.prepare('DELETE FROM alerts WHERE id = ?').run(id);
+    await db.run('DELETE FROM alerts WHERE id = ?', id);
     recordAudit(fromRequest(req, 'alert.delete', { entity: 'alert', entityId: id }));
-    hub.broadcast('alert', 'alert:delete', { id });
+    hub.broadcast('alert', 'alert:delete', { id }, row.tenant_id ?? null);
     res.json({ success: true, data: { message: 'Alert removed.' } });
   }),
 );

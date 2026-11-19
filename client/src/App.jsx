@@ -20,7 +20,8 @@ import {
   useLocation,
 } from 'react-router-dom';
 
-import Layout from './components/Layout.jsx';import ErrorBoundary from './components/ErrorBoundary.jsx';
+import Layout from './components/Layout.jsx';
+import ErrorBoundary from './components/ErrorBoundary.jsx';
 import { Icon } from './components/Icon.jsx';
 import SessionTimeout from './components/SessionTimeout.jsx';
 import { EmptyState, Spinner } from './components/ui.jsx';
@@ -246,13 +247,14 @@ function AppRoutes() {
               <Route index element={<Dashboard />} />
 
             <Route
-              path="live"
+              path="live-monitor"
               element={
                 <PermissionGate permission="dashboard:read">
                   <LiveMonitor />
                 </PermissionGate>
               }
             />
+            <Route path="live" element={<Navigate to="/live-monitor" replace />} />
 
             <Route
               path="students"
@@ -287,17 +289,18 @@ function AppRoutes() {
               }
             />
             <Route
-              path="fleet"
+              path="buses-routes"
               element={
                 <PermissionGate permission="fleet:read">
                   {isSuperAdmin ? (
-                    <Navigate to="/admin/colleges" replace />
+                    <Navigate to="/super-admin/colleges" replace />
                   ) : (
                     <Fleet />
                   )}
                 </PermissionGate>
               }
             />
+            <Route path="fleet" element={<Navigate to="/buses-routes" replace />} />
 
             <Route
               path="users"
@@ -308,12 +311,16 @@ function AppRoutes() {
               }
             />
             <Route
-              path="admin/student-accounts"
+              path="student-accounts"
               element={
                 <PermissionGate permission="users:read">
                   <StudentManagement />
                 </PermissionGate>
               }
+            />
+            <Route
+              path="admin/student-accounts"
+              element={<Navigate to="/student-accounts" replace />}
             />
             <Route
               path="roles"

@@ -51,6 +51,25 @@ const dataDir = path.resolve(SERVER_ROOT, process.env.DATA_DIR || './data');
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(path.join(dataDir, 'backups'), { recursive: true });
 
+const toInt = (value, fallback) => {
+  const parsed = Number.parseInt(value ?? '', 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+/**
+ * MySQL connection settings.
+ *
+ * The service talks to the local XAMPP MariaDB server (see
+ * `server/sql/schema.sql` for the DDL). Every value can be overridden from `server/.env`; the defaults
+ * match the homelab box that runs production. The `DB_*` variables below are
+ * also what the test harness points at the isolated `transitsync_test` schema.
+ */
+const dbHost = process.env.DB_HOST || '127.0.0.1';
+const dbPort = toInt(process.env.DB_PORT, 3306);
+const dbUser = process.env.DB_USER || 'transitsync';
+const dbPassword = process.env.DB_PASSWORD || '';
+const dbName = process.env.DB_NAME || 'transitsync';
+
 const jwtSecret = process.env.JWT_SECRET || '';
 
 if (!jwtSecret) {
@@ -59,11 +78,6 @@ if (!jwtSecret) {
 if (isProduction && (jwtSecret.length < 32 || jwtSecret.startsWith('change-me'))) {
   throw new Error('JWT_SECRET must be at least 32 characters and not the example value in production.');
 }
-
-const toInt = (value, fallback) => {
-  const parsed = Number.parseInt(value ?? '', 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
-};
 
 const port = toInt(process.env.PORT, 8080);
 
@@ -78,8 +92,19 @@ export const config = {
     serverRoot: SERVER_ROOT,
     dataDir,
     backupDir: path.join(dataDir, 'backups'),
-    dbFile: process.env.DB_FILE || path.join(dataDir, 'transitsync.db'),
     clientDist: path.resolve(SERVER_ROOT, '..', 'client', 'dist'),
+  },
+
+  /**
+   * Database. These values feed the MariaDB/MySQL pool in `server/db.js`.
+   */
+  db: {
+    host: dbHost,
+    port: dbPort,
+    user: dbUser,
+    password: dbPassword,
+    database: dbName,
+    connectionLimit: toInt(process.env.DB_CONNECTION_LIMIT, 10),
   },
 
   jwt: {
@@ -89,6 +114,47 @@ export const config = {
     expiresIn: process.env.JWT_EXPIRES_IN || '8h',
     cookieName: process.env.JWT_COOKIE_NAME || 'transitsync_token',
   },
+
+  /**
+   * Google Identity Services. The client id is public by design (it is handed
+   * to the browser by `/api/auth/google/config`); every ID token is verified
+   * server-side against Google's published signing keys and audience before a
+   * session is minted.
+   *
+   * ENABLE_GOOGLE_AUTH is the deployment-level kill switch. `false`/`0`/`no`
+   * prevents the routes from being mounted at all. When it is unset the legacy
+   * behaviour is kept: a configured client id enables the feature. The primary
+   * server sets ENABLE_GOOGLE_AUTH=true; Google-free deployments set it false.
+   *
+   * `domainMap` is an optional deployment-level fallback for domains that
+   * cannot be stored in `institution_email_domains`, in the form
+   * `domain:tenantId,other.edu.np:another-tenant-id`.
+   */
+  google: (() => {
+    const clientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
+    const flag = (process.env.ENABLE_GOOGLE_AUTH || '').trim().toLowerCase();
+    const disabled = flag === 'false' || flag === '0' || flag === 'no';
+    const enabled = Boolean(clientId) && !disabled;
+    return {
+      clientId,
+      enabled,
+      domainMap: new Map(
+        (process.env.GOOGLE_DOMAIN_MAP || '')
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+          .map((entry) => {
+            const separator = entry.indexOf(':');
+            if (separator < 1) return null;
+            return [
+              entry.slice(0, separator).trim().toLowerCase(),
+              entry.slice(separator + 1).trim(),
+            ];
+          })
+          .filter((entry) => entry && entry[0] && entry[1]),
+      ),
+    };
+  })(),
 
   bootstrap: {
     email: (process.env.BOOTSTRAP_ADMIN_EMAIL || 'admin@transitsync.edu.np').toLowerCase(),

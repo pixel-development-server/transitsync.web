@@ -10,6 +10,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Icon } from '../components/Icon.jsx';
 import { CampusSelect, useCampusDirectory, usePlatformScope } from '../components/CampusScope.jsx';
 import { EmptyState, Spinner, Button } from '../components/ui.jsx';
+import { formatFull } from '../lib/format.js';
 
 function Input({ className = '', ...props }) {
   return <input className={`field ${className}`} {...props} />;
@@ -137,6 +138,8 @@ export default function StudentManagement() {
         Status: u.status,
         Role: u.roleName,
         'Institution': u.institutionName || '',
+        'College ID': u.studentCollegeId || '',
+        'Card status': u.studentCardStatus || '',
         'Last login': u.lastLoginAt || '',
         'Created at': u.createdAt,
       })),
@@ -169,7 +172,7 @@ export default function StudentManagement() {
         colleges={colleges}
         value={searchParams.get('tenantId')}
         onChange={(tenantId) => updateParam('tenantId', tenantId)}
-        wrapperClass="w-60"
+        wrapperClass="w-full sm:w-60"
       />
 
       <section className="card overflow-hidden">
@@ -202,13 +205,15 @@ export default function StudentManagement() {
             message="Add students to the roster and they will appear here when linked."
           />
         ) : (
-          <div className="overflow-x-auto">
+          <div className="min-w-0 overflow-x-auto overscroll-x-contain">
             <table className="w-full border-collapse text-left">
               <thead className="sticky top-0 z-10 bg-[var(--surface-raised)]">
                 <tr className="border-b border-[var(--border-subtle)]">
-                  <th className="th min-w-[220px]">Student</th>
+                  <th className="th min-w-[9rem] sm:min-w-[13.75rem]">Student</th>
+                  <th className="th hidden md:table-cell">College ID</th>
                   <th className="th hidden md:table-cell">Email</th>
                   <th className="th">Status</th>
+                  <th className="th hidden lg:table-cell">Card</th>
                   <th className="th hidden lg:table-cell">Institution</th>
                   <th className="th hidden xl:table-cell">Last login</th>
                   <th className="th text-right">Actions</th>
@@ -224,6 +229,9 @@ export default function StudentManagement() {
                       <div className="font-medium text-mist-100">{u.fullName}</div>
                       <div className="text-xs text-mist-500 md:hidden">{u.email}</div>
                     </td>
+                    <td className="td hidden md:table-cell font-mono text-mist-500">
+                      {u.studentCollegeId || '-'}
+                    </td>
                     <td className="td hidden md:table-cell text-mist-500">{u.email}</td>
                     <td className="td">
                       <span
@@ -238,14 +246,29 @@ export default function StudentManagement() {
                         {u.status}
                       </span>
                     </td>
+                    <td className="td hidden lg:table-cell">
+                      {u.studentCardStatus ? (
+                        <span
+                          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+                            u.studentCardStatus === 'ACTIVE'
+                              ? 'bg-emerald-500/10 text-emerald-600'
+                              : 'bg-amber-500/10 text-amber-600'
+                          }`}
+                        >
+                          {u.studentCardStatus.toLowerCase()}
+                        </span>
+                      ) : (
+                        <span className="text-mist-500">-</span>
+                      )}
+                    </td>
                     <td className="td hidden lg:table-cell text-mist-500">
                       {u.institutionName || '-'}
                     </td>
                     <td className="td hidden xl:table-cell text-mist-500">
-                      {u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString() : '-'}
+                      {u.lastLoginAt ? formatFull(u.lastLoginAt) : '-'}
                     </td>
                     <td className="td text-right">
-                      <div className="flex justify-end gap-2">
+                      <div className="flex flex-col items-end gap-1.5 sm:flex-row sm:justify-end sm:gap-2">
                         {can('users:edit') && (
                           <Button
                             type="button"

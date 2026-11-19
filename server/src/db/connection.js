@@ -1,37 +1,23 @@
-import fs from 'node:fs';
-import config from '../config/env.js';
-import { openDatabase } from './driver.js';
-
-let instance = null;
+import { db, closeDb as closePool } from '../../db.js';
 
 /**
- * Process-wide SQLite handle. SQLite is single-writer, and every route in this
- * service is short synchronous work, so one shared connection is both correct and
- * dramatically faster than a pool.
+ * Compatibility bridge to the database facade in `server/db.js`.
+ *
+ * Every route and service resolves its handle through `getDb()`, which returns
+ * the process-wide async facade (`all` / `get` / `run` / `transaction`). Every
+ * statement it exposes returns a Promise and must be awaited.
  */
 export function getDb() {
-  if (instance) return instance;
-
-  const location = process.env.DB_FILE || config.paths.dbFile;
-  if (location !== ':memory:') {
-    fs.mkdirSync(config.paths.dataDir, { recursive: true });
-  }
-
-  instance = openDatabase(location);
-  return instance;
+  return db;
 }
 
-/** Used by the test harness to spin up an isolated in-memory database. */
-export function setDb(db) {
-  instance = db;
-  return instance;
+/** Test hook kept for source compatibility; the MySQL pool is process-wide. */
+export function setDb() {
+  return db;
 }
 
 export function closeDb() {
-  if (instance) {
-    instance.close();
-    instance = null;
-  }
+  return closePool();
 }
 
 export default getDb;

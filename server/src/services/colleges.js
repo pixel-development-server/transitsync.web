@@ -20,11 +20,13 @@ import { hashPassword, generateTemporaryPassword } from '../lib/password.js';
 /** Columns that describe a campus for the master panel table. */
 const COLLEGE_SELECT = `
   SELECT i.id, i.name, i.code, i.status, i.created_at, i.updated_at,
-         (SELECT u.email FROM users u JOIN roles r ON r.id = u.role_id
-            WHERE u.tenant_id = i.id AND r.key = '${ROLE_KEYS.SYSTEM_ADMIN}'
+         (SELECT GROUP_CONCAT(d.domain ORDER BY d.domain SEPARATOR ',')
+            FROM institution_email_domains d WHERE d.institution_id = i.id) AS email_domains,
+          (SELECT u.email FROM users u JOIN roles r ON r.id = u.role_id
+            WHERE u.tenant_id = i.id AND r.\`key\` = '${ROLE_KEYS.SYSTEM_ADMIN}'
             ORDER BY u.id LIMIT 1)                                  AS admin_email,
          (SELECT COUNT(*) FROM users u JOIN roles r ON r.id = u.role_id
-            WHERE u.tenant_id = i.id AND r.key = '${ROLE_KEYS.SYSTEM_ADMIN}') AS admin_count,
+            WHERE u.tenant_id = i.id AND r.\`key\` = '${ROLE_KEYS.SYSTEM_ADMIN}') AS admin_count,
          (SELECT COUNT(*) FROM students s WHERE s.tenant_id = i.id)  AS student_count,
          (SELECT COUNT(*) FROM buses   b WHERE b.tenant_id = i.id)   AS bus_count,
          (SELECT COUNT(*) FROM routes  rt WHERE rt.tenant_id = i.id) AS route_count
@@ -37,6 +39,7 @@ function shape(row) {
     name: row.name,
     code: row.code,
     status: row.status,
+    emailDomains: row.email_domains ? row.email_domains.split(',').filter(Boolean) : [],
     adminEmail: row.admin_email ?? null,
     adminCount: row.admin_count ?? 0,
     studentCount: row.student_count ?? 0,
@@ -47,16 +50,48 @@ function shape(row) {
   };
 }
 
+/** Domain part of an email address, lower-cased. */
+function domainOf(email) {
+  const value = String(email || '').trim().toLowerCase();
+  const at = value.lastIndexOf('@');
+  return at >= 0 && at < value.length - 1 ? value.slice(at + 1) : '';
+}
+
+/** De-duplicate and normalise a list of institutional domains. */
+function normaliseDomains(list = []) {
+  return [...new Set(list.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean))];
+}
+
+/** A domain may belong to only one campus — fail before writing anything. */
+async function assertDomainsFree(db, domains, institutionId = null) {
+  for (const domain of domains) {
+    const owner = await db.get('SELECT institution_id FROM institution_email_domains WHERE domain = ?', domain);
+    if (owner && owner.institution_id !== institutionId) {
+      throw conflict(`The email domain @${domain} is already assigned to another college.`);
+    }
+  }
+}
+
+async function replaceDomains(db, institutionId, domains) {
+  await db.run('DELETE FROM institution_email_domains WHERE institution_id = ?', institutionId);
+  for (const domain of domains) {
+    await db.run(
+      'INSERT IGNORE INTO institution_email_domains (domain, institution_id) VALUES (?, ?)',
+      domain, institutionId,
+    );
+  }
+}
+
 /** Every live campus, oldest first, with its administrator and headcounts. Tombstoned campuses are hidden. */
-export function listColleges(db = getDb()) {
-  const rows = db
-    .prepare(`${COLLEGE_SELECT} WHERE i.deleted_at IS NULL ORDER BY i.created_at ASC, i.name ASC`)
-    .all();
+export async function listColleges(db = getDb()) {
+  const rows = await db.all(
+    `${COLLEGE_SELECT} WHERE i.deleted_at IS NULL ORDER BY i.created_at ASC, i.name ASC`,
+  );
   return rows.map(shape);
 }
 
-export function getCollege(db, id) {
-  return shape(db.prepare(`${COLLEGE_SELECT} WHERE i.id = ?`).get(id));
+export async function getCollege(db, id) {
+  return shape(await db.get(`${COLLEGE_SELECT} WHERE i.id = ?`, id));
 }
 
 /**
@@ -68,40 +103,51 @@ export function getCollege(db, id) {
  * of the panel is never the long-term one. The plaintext password is returned
  * exactly once — this deployment has no mail server.
  */
-export async function provisionCollege(db, { name, code, adminEmail, adminName }, actorId = null) {
-  if (db.prepare('SELECT id FROM institutions WHERE code = ?').get(code)) {
+export async function provisionCollege(db, { name, code, adminEmail, adminName, emailDomains }, actorId = null) {
+  if (await db.get('SELECT id FROM institutions WHERE code = ?', code)) {
     throw conflict(`A college with the code "${code}" already exists.`);
   }
-  if (db.prepare('SELECT id FROM users WHERE email = ?').get(adminEmail)) {
+  if (await db.get('SELECT id FROM users WHERE email = ?', adminEmail)) {
     throw conflict('A user with that administrator email already exists.');
   }
 
-  const role = db.prepare('SELECT id FROM roles WHERE key = ?').get(ROLE_KEYS.SYSTEM_ADMIN);
+  // The administrator's own domain is always authorised — it is how existing
+  // campuses were identified before the domain registry existed.
+  const domains = normaliseDomains([...(emailDomains || []), domainOf(adminEmail)]);
+  await assertDomainsFree(db, domains);
+
+  const role = await db.get('SELECT id FROM roles WHERE `key` = ?', ROLE_KEYS.SYSTEM_ADMIN);
   if (!role) throw unprocessable('The System Administrator role is not installed.');
 
   const tenantId = crypto.randomUUID();
   const temporaryPassword = generateTemporaryPassword();
   const passwordHash = await hashPassword(temporaryPassword);
 
-  const adminUserId = db.transaction(() => {
-    db.prepare(
+  const adminUserId = await db.transaction(async () => {
+    await db.run(
       `INSERT INTO institutions (id, name, code, status) VALUES (?, ?, ?, 'ACTIVE')`,
-    ).run(tenantId, name, code);
+      tenantId, name, code,
+    );
+    for (const domain of domains) {
+      await db.run(
+        'INSERT IGNORE INTO institution_email_domains (domain, institution_id) VALUES (?, ?)',
+        domain, tenantId,
+      );
+    }
 
-    const result = db
-      .prepare(
-        `INSERT INTO users
-           (email, full_name, password_hash, job_title, department, role_id, status,
-            tenant_id, is_first_login, password_changed, force_password_reset, permissions_mode, created_by)
-         VALUES (?, ?, ?, 'Campus Administrator', 'Administration', ?, 'active', ?, 1, 0, 1, 'INHERIT', ?)`,
-      )
-      .run(adminEmail, adminName || `${name} Administrator`, passwordHash, role.id, tenantId, actorId);
+    const result = await db.run(
+      `INSERT INTO users
+         (email, full_name, password_hash, job_title, department, role_id, status,
+          tenant_id, is_first_login, password_changed, force_password_reset, permissions_mode, created_by)
+       VALUES (?, ?, ?, 'Campus Administrator', 'Administration', ?, 'active', ?, 1, 0, 1, 'INHERIT', ?)`,
+      adminEmail, adminName || `${name} Administrator`, passwordHash, role.id, tenantId, actorId,
+    );
 
     return Number(result.lastInsertRowid);
   });
 
   return {
-    college: getCollege(db, tenantId),
+    college: await getCollege(db, tenantId),
     admin: { id: adminUserId, email: adminEmail, userId: adminUserId },
     credentials: {
       email: adminEmail,
@@ -113,11 +159,11 @@ export async function provisionCollege(db, { name, code, adminEmail, adminName }
 }
 
 /** Suspend or restore a campus. */
-export function setCollegeStatus(db, id, status) {
-  const existing = db.prepare('SELECT id FROM institutions WHERE id = ?').get(id);
+export async function setCollegeStatus(db, id, status) {
+  const existing = await db.get('SELECT id FROM institutions WHERE id = ?', id);
   if (!existing) throw notFound('College');
-  db.prepare("UPDATE institutions SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, id);
-  return getCollege(db, id);
+  await db.run('UPDATE institutions SET status = ?, updated_at = NOW() WHERE id = ?', status, id);
+  return await getCollege(db, id);
 }
 
 /**
@@ -126,49 +172,65 @@ export function setCollegeStatus(db, id, status) {
  * primary System Administrator's login, changing it rewrites that user's email
  * (with the usual uniqueness check) inside the same transaction.
  */
-export function updateCollege(db, id, { name, code, adminEmail } = {}) {
-  const existing = db.prepare('SELECT * FROM institutions WHERE id = ?').get(id);
+export async function updateCollege(db, id, { name, code, adminEmail, emailDomains } = {}) {
+  const existing = await db.get('SELECT * FROM institutions WHERE id = ?', id);
   if (!existing) throw notFound('College');
+
+  const hasDomainEdit = emailDomains !== undefined;
+  const adminDomain = adminEmail ? domainOf(adminEmail) : '';
+  const domains = hasDomainEdit
+    ? normaliseDomains([...emailDomains, ...(adminDomain ? [adminDomain] : [])])
+    : [];
+  if (hasDomainEdit) await assertDomainsFree(db, domains, id);
+  else if (adminDomain) await assertDomainsFree(db, [adminDomain], id);
 
   // Uniqueness against the live set, only when the value actually changes.
   if (code && code !== existing.code) {
-    if (db.prepare('SELECT id FROM institutions WHERE code = ? AND id <> ?').get(code, id)) {
+    if (await db.get('SELECT id FROM institutions WHERE code = ? AND id <> ?', code, id)) {
       throw conflict(`A college with the code "${code}" already exists.`);
     }
   }
 
   let adminId = null;
   if (adminEmail) {
-    const admin = db
-      .prepare(
-        `SELECT u.id, u.email FROM users u JOIN roles r ON r.id = u.role_id
-          WHERE u.tenant_id = ? AND r.key = ? ORDER BY u.id LIMIT 1`,
-      )
-      .get(id, ROLE_KEYS.SYSTEM_ADMIN);
+    const admin = await db.get(
+      `SELECT u.id, u.email FROM users u JOIN roles r ON r.id = u.role_id
+        WHERE u.tenant_id = ? AND r.\`key\` = ? ORDER BY u.id LIMIT 1`,
+      id, ROLE_KEYS.SYSTEM_ADMIN,
+    );
     if (admin && admin.email.toLowerCase() !== adminEmail.toLowerCase()) {
-      if (db.prepare('SELECT id FROM users WHERE email = ? AND id <> ?').get(adminEmail, admin.id)) {
+      if (await db.get('SELECT id FROM users WHERE email = ? AND id <> ?', adminEmail, admin.id)) {
         throw conflict('A user with that administrator email already exists.');
       }
       adminId = admin.id;
     }
   }
 
-  db.transaction(() => {
+  await db.transaction(async () => {
     if (name || code) {
-      db.prepare(
+      await db.run(
         `UPDATE institutions
             SET name = COALESCE(NULLIF(?, ''), name),
                 code = COALESCE(NULLIF(?, ''), code),
-                updated_at = datetime('now')
+                updated_at = NOW()
           WHERE id = ?`,
-      ).run(name ?? null, code ?? null, id);
+        name ?? null, code ?? null, id,
+      );
     }
     if (adminId) {
-      db.prepare("UPDATE users SET email = ?, updated_at = datetime('now') WHERE id = ?").run(adminEmail, adminId);
+      await db.run('UPDATE users SET email = ?, updated_at = NOW() WHERE id = ?', adminEmail, adminId);
+    }
+    if (hasDomainEdit) {
+      await replaceDomains(db, id, domains);
+    } else if (adminDomain) {
+      await db.run(
+        'INSERT IGNORE INTO institution_email_domains (domain, institution_id) VALUES (?, ?)',
+        adminDomain, id,
+      );
     }
   });
 
-  return getCollege(db, id);
+  return await getCollege(db, id);
 }
 
 /**
@@ -185,47 +247,51 @@ export function updateCollege(db, id, { name, code, adminEmail } = {}) {
  * (users, students, buses, routes) instead; operational alert/scan rows are
  * unlinked (`tenant_id` → NULL) rather than destroyed.
  */
-export function deleteCollege(db, id, { purge = false } = {}) {
-  const existing = db.prepare('SELECT * FROM institutions WHERE id = ?').get(id);
+export async function deleteCollege(db, id, { purge = false } = {}) {
+  const existing = await db.get('SELECT * FROM institutions WHERE id = ?', id);
   if (!existing) throw notFound('College');
 
   if (purge) {
-    db.transaction(() => {
-      db.prepare('DELETE FROM students WHERE tenant_id = ?').run(id);
-      db.prepare('DELETE FROM buses WHERE tenant_id = ?').run(id);
-      db.prepare('DELETE FROM routes WHERE tenant_id = ?').run(id);
-      db.prepare('DELETE FROM users WHERE tenant_id = ?').run(id);
-      db.prepare('UPDATE alerts      SET tenant_id = NULL WHERE tenant_id = ?').run(id);
-      db.prepare('UPDATE scan_events SET tenant_id = NULL WHERE tenant_id = ?').run(id);
-      db.prepare('DELETE FROM institutions WHERE id = ?').run(id);
+    await db.transaction(async () => {
+      await db.run('DELETE FROM students WHERE tenant_id = ?', id);
+      await db.run('DELETE FROM buses WHERE tenant_id = ?', id);
+      await db.run('DELETE FROM routes WHERE tenant_id = ?', id);
+      await db.run('DELETE FROM users WHERE tenant_id = ?', id);
+      await db.run('UPDATE alerts      SET tenant_id = NULL WHERE tenant_id = ?', id);
+      await db.run('UPDATE scan_events SET tenant_id = NULL WHERE tenant_id = ?', id);
+      await db.run('DELETE FROM institutions WHERE id = ?', id);
     });
     return { id, name: existing.name, code: existing.code, deleted: true, purge: true };
   }
 
-  db.transaction(() => {
-    db.prepare(
-      "UPDATE institutions SET status = 'SUSPENDED', deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
-    ).run(id);
-    db.prepare(
-      "UPDATE users SET status = 'suspended', token_version = token_version + 1, updated_at = datetime('now') WHERE tenant_id = ?",
-    ).run(id);
-    db.prepare(
-      `UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = 'tenant_deleted'
+  await db.transaction(async () => {
+    await db.run(
+      "UPDATE institutions SET status = 'SUSPENDED', deleted_at = NOW(), updated_at = NOW() WHERE id = ?",
+      id,
+    );
+    await db.run(
+      "UPDATE users SET status = 'suspended', token_version = token_version + 1, updated_at = NOW() WHERE tenant_id = ?",
+      id,
+    );
+    await db.run(
+      `UPDATE login_sessions SET revoked_at = NOW(), revoked_reason = 'tenant_deleted'
         WHERE user_id IN (SELECT id FROM users WHERE tenant_id = ?) AND revoked_at IS NULL`,
-    ).run(id);
-    db.prepare(
-      "UPDATE students SET status = 'WITHDRAWN', updated_at = datetime('now') WHERE tenant_id = ? AND status = 'ACTIVE'",
-    ).run(id);
+      id,
+    );
+    await db.run(
+      "UPDATE students SET status = 'WITHDRAWN', updated_at = NOW() WHERE tenant_id = ? AND status = 'ACTIVE'",
+      id,
+    );
   });
 
-  return { ...getCollege(db, id), deleted: true };
+  return { ...(await getCollege(db, id)), deleted: true };
 }
 
 /** Aggregate figures for the System Health panel. */
-export function platformOverview(db = getDb()) {
-  const count = (sql, ...params) => db.prepare(sql).get(...params).n;
+export async function platformOverview(db = getDb()) {
+  const count = async (sql, ...params) => (await db.get(sql, ...params)).n;
 
-  const colleges = listColleges(db);
+  const colleges = await listColleges(db);
 
   return {
     colleges: {
@@ -234,19 +300,18 @@ export function platformOverview(db = getDb()) {
       suspended: colleges.filter((c) => c.status === 'SUSPENDED').length,
     },
     users: {
-      total: count('SELECT COUNT(*) AS n FROM users'),
-      byRole: db
-        .prepare(
-          `SELECT r.key, r.name, r.level, COUNT(u.id) AS count
+      total: await count('SELECT COUNT(*) AS n FROM users'),
+      byRole: (
+        await db.all(
+          `SELECT r.\`key\`, r.name, r.level, COUNT(u.id) AS count
              FROM roles r LEFT JOIN users u ON u.role_id = r.id
             GROUP BY r.id ORDER BY r.level DESC`,
         )
-        .all()
-        .map((row) => ({ ...row })),
+      ).map((row) => ({ ...row })),
     },
-    students: count('SELECT COUNT(*) AS n FROM students'),
-    buses: count('SELECT COUNT(*) AS n FROM buses'),
-    routes: count('SELECT COUNT(*) AS n FROM routes'),
+    students: await count('SELECT COUNT(*) AS n FROM students'),
+    buses: await count('SELECT COUNT(*) AS n FROM buses'),
+    routes: await count('SELECT COUNT(*) AS n FROM routes'),
   };
 }
 

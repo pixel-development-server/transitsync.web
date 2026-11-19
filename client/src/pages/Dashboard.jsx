@@ -16,6 +16,7 @@ import {
 } from '../components/ui.jsx';
 import { useApi } from '../lib/hooks.js';
 import { useAuth } from '../lib/auth.jsx';
+import { CampusSelect, useCampusDirectory, usePlatformScope } from '../components/CampusScope.jsx';
 import { useEventStream } from '../lib/stream.js';
 import { formatNumber, formatTime } from '../lib/format.js';
 
@@ -82,10 +83,17 @@ function FleetCard({ bus }) {
 
 export default function Dashboard() {
   const { can, user } = useAuth();
+  const { isPlatform } = usePlatformScope();
+  const { colleges } = useCampusDirectory(isPlatform);
+  // Platform principals govern every campus, so the dashboard serves no campus
+  // data until they pick one here — the same drill-in contract as the Students
+  // registry (mirrors `?tenantId=` on the API).
+  const [tenantId, setTenantId] = useState('');
   const [liveFeeds, setLiveFeeds] = useState(0);
 
   const { data, error, loading, refreshing, reload } = useApi('/dashboard', {
     enabled: can('dashboard:read'),
+    params: isPlatform && tenantId ? { tenantId } : {},
   });
 
   // Live counters: cheap local state fed by the stream rather than a full
@@ -172,6 +180,13 @@ export default function Dashboard() {
             <span className="ml-1 [&>span]:text-white [&_.ts-pulse]:bg-white">
               <LiveIndicator status={streamStatus} />
             </span>
+            <CampusSelect
+              isPlatform={isPlatform}
+              colleges={colleges}
+              value={tenantId}
+              onChange={setTenantId}
+              wrapperClass="ml-auto w-full sm:w-56 [&_label]:text-white/70"
+            />
           </div>
         </div>
 

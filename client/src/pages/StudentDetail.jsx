@@ -33,7 +33,7 @@ function DetailRow({ label, value, mono = false }) {
   return (
     <div className="flex items-start justify-between gap-3 border-b border-[var(--border-subtle)]/60 py-2 last:border-b-0">
       <dt className="shrink-0 text-[0.74rem] text-mist-500">{label}</dt>
-      <dd className={`min-w-0 text-right text-[0.8rem] text-mist-200 ${mono ? 'font-mono' : ''}`}>{value ?? '—'}</dd>
+      <dd className={`min-w-0 text-right text-[0.8rem] leading-snug text-mist-200 break-words ${mono ? 'font-mono break-all' : ''}`}>{value ?? '—'}</dd>
     </div>
   );
 }

@@ -315,7 +315,7 @@ function DetailModal({ alert, open, onClose, onDone, canResolve, canEditStudents
             <AlertTypeTag tag={alert.tag} label={alert.typeLabel} />
           </div>
 
-          <p className="text-[0.85rem] leading-relaxed text-mist-300">{alert.message}</p>
+          <p className="text-[0.85rem] leading-relaxed text-mist-300 break-words">{alert.message}</p>
 
           <dl className="grid gap-x-4 gap-y-2.5 text-[0.78rem] sm:grid-cols-2">
             <Field label="Raised at" value={formatDateTime(alert.createdAt)} />
@@ -375,9 +375,9 @@ function DetailModal({ alert, open, onClose, onDone, canResolve, canEditStudents
 
 function Field({ label, value, mono }) {
   return (
-    <div>
+    <div className="min-w-0">
       <dt className="text-[0.66rem] font-bold tracking-[0.06em] text-mist-500 uppercase">{label}</dt>
-      <dd className={`mt-0.5 text-mist-200 ${mono ? 'font-mono text-[0.75rem]' : ''}`}>{value ?? '—'}</dd>
+      <dd className={`mt-0.5 text-mist-200 break-words ${mono ? 'font-mono text-[0.75rem] break-all' : ''}`}>{value ?? '—'}</dd>
     </div>
   );
 }
@@ -508,12 +508,14 @@ export default function Alerts() {
     {
       key: 'type',
       label: 'Type',
+      hideBelow: 'lg',
       nowrap: true,
       render: (row) => <AlertTypeTag tag={row.tag} label={row.typeLabel} />,
     },
     {
       key: 'subject',
       label: 'Subject',
+      hideBelow: 'md',
       render: (row) =>
         row.studentId ? (
           <Link
@@ -539,6 +541,7 @@ export default function Alerts() {
     {
       key: 'createdAt',
       label: 'Raised',
+      hideBelow: 'lg',
       align: 'right',
       nowrap: true,
       render: (row) => (
@@ -601,7 +604,7 @@ export default function Alerts() {
       <div className="card mb-4 p-3.5">
         <FilterBar onClear={clearFilters}>
           <Input
-            wrapperClass="min-w-[13rem] flex-1"
+            wrapperClass="w-full min-w-0 flex-1 sm:min-w-[13rem]"
             placeholder="Search alerts…"
             icon="search"
             value={search}
@@ -609,14 +612,14 @@ export default function Alerts() {
             aria-label="Search alerts"
           />
           <Select
-            wrapperClass="w-44"
+            wrapperClass="w-full sm:w-44"
             label="Status"
             value={status}
             onChange={(event) => setStatus(event.target.value)}
             options={STATUSES.map((entry) => ({ value: entry, label: titleCase(entry) }))}
           />
           <Select
-            wrapperClass="w-40"
+            wrapperClass="w-full sm:w-40"
             label="Severity"
             value={severity}
             onChange={(event) => setSeverity(event.target.value)}
@@ -625,7 +628,7 @@ export default function Alerts() {
           />
           {typeOptions.length ? (
             <Select
-              wrapperClass="w-48"
+              wrapperClass="w-full sm:w-48"
               label="Type"
               value={type}
               onChange={(event) => setType(event.target.value)}

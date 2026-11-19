@@ -1,0 +1,201 @@
+name: Deploy TransitSync (primary + Git fallback)
+
+# One pipeline, two publishing targets:
+#   1. Git-hosted fallback (GitHub Pages) — static bundle compiled WITHOUT
+#      Google Sign-In (VITE_ENABLE_GOOGLE_AUTH=false). It is only used by the
+#      edge router when the primary origin fails its health check.
+#   2. Primary self-hosted Windows homelab — a self-hosted Actions runner pulls
+#      this exact commit into C:\SYP, builds the FULL bundle (Google enabled),
+#      restarts the TransitSync-Web scheduled task and gates on /api/health.
+#
+# The edge (Cloudflare Worker / Load Balancer) owns the failover decision.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: transitsync-deploy
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Cheap static checks. Both publishing jobs wait for this.
+  # -------------------------------------------------------------------------
+  verify:
+    name: Verify sources
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Check server syntax
+        run: |
+          find server/src server/scripts scripts -type f \( -name '*.js' -o -name '*.mjs' \) \
+            -print0 | xargs -0 -n1 node --check
+
+      - name: Lint client
+        working-directory: client
+        run: |
+          npm ci
+          npm run lint
+
+  # -------------------------------------------------------------------------
+  # Git-hosted fallback: Google-free static bundle -> GitHub Pages artifact.
+  # -------------------------------------------------------------------------
+  build-fallback:
+    name: Build Google-free fallback
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install client dependencies
+        working-directory: client
+        run: npm ci
+
+      # A fresh runner has no dist/, but the explicit clean makes the
+      # "no Google code" assertion below independent of stale local artifacts.
+      - name: Clean previous build
+        run: rm -rf client/dist
+
+      - name: Build fallback bundle (Google Sign-In disabled)
+        working-directory: client
+        env:
+          VITE_ENABLE_GOOGLE_AUTH: 'false'
+          # Same-origin keeps auth cookies first-party and lets the edge answer
+          # /api/* with a clean 503 PRIMARY_OFFLINE while the primary is down.
+          VITE_API_URL: '/api'
+        run: npm run build
+
+      # Hard guarantee: fail the build if any Google OAuth code/string survived.
+      - name: Assert no Google Sign-In in fallback bundle
+        run: |
+          set -euo pipefail
+          if grep -RInE --include='*.js' --include='*.html' --include='*.json' --include='*.webmanifest' \
+            'accounts\.google\.com|Continue with Google|auth/google|google\.accounts\.id|GOOGLE_CLIENT_ID|GoogleSignIn' \
+            client/dist; then
+            echo "::error::Google Sign-In leaked into the fallback bundle"
+            exit 1
+          fi
+          test -f client/dist/index.html
+          test -f client/dist/404.html
+          echo "Fallback bundle verified: Google-free."
+
+      - name: Add custom-domain marker (CNAME)
+        run: echo "transitsync.me" > client/dist/CNAME
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: client/dist
+
+  deploy-fallback:
+    name: Publish Git-hosted fallback
+    needs: [verify, build-fallback]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # -------------------------------------------------------------------------
+  # Primary Windows homelab: full features, pulled from this same commit by a
+  # self-hosted runner. No SSH keys or inbound ports are required.
+  # -------------------------------------------------------------------------
+  deploy-primary:
+    name: Update primary homelab
+    needs: verify
+    runs-on: [self-hosted, windows, transitsync-primary]
+    env:
+      CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CF_ZONE: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+    steps:
+      - name: Pull the exact commit that triggered this run
+        working-directory: ${{ vars.PRIMARY_DEPLOY_PATH || 'C:\SYP' }}
+        shell: pwsh
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Pin full-feature flags for any service-triggered rebuild
+        working-directory: ${{ vars.PRIMARY_DEPLOY_PATH || 'C:\SYP' }}
+        shell: pwsh
+        run: |
+          # Git-ignored local file. prepare-client.mjs can rebuild the bundle when
+          # the service restarts; it must build the FULL UI, not the fallback.
+          @'
+          VITE_API_URL=/api
+          VITE_ENABLE_GOOGLE_AUTH=true
+          '@ | Set-Content -Path client\.env.production.local -Encoding utf8
+
+      - name: Install clean dependencies
+        working-directory: ${{ vars.PRIMARY_DEPLOY_PATH || 'C:\SYP' }}
+        shell: pwsh
+        run: |
+          npm ci --prefix server
+          npm ci --prefix client
+
+      - name: Build the FULL client (Google Sign-In enabled)
+        working-directory: ${{ vars.PRIMARY_DEPLOY_PATH || 'C:\SYP' }}
+        shell: pwsh
+        run: |
+          $env:VITE_API_URL = '/api'
+          $env:VITE_ENABLE_GOOGLE_AUTH = 'true'
+          npm run build --prefix client
+
+      - name: Restart the TransitSync web service
+        shell: pwsh
+        run: |
+          $task = 'TransitSync-Web'
+          if (Get-ScheduledTask -Name $task -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            Start-ScheduledTask -TaskName $task
+            Write-Host "Restarted $task"
+          } else {
+            Write-Warning "$task is not installed - run scripts\install-web-service.ps1"
+          }
+
+      - name: Verify MySQL connectivity via /api/health + Google route
+        working-directory: ${{ vars.PRIMARY_DEPLOY_PATH || 'C:\SYP' }}
+        shell: pwsh
+        run: |
+          node scripts\verify-deploy.mjs http://127.0.0.1:3100/api/health 120000 --expect-google-route
+
+      - name: Purge edge cache so no stale HTML/JS survives the restart
+        if: env.CF_TOKEN != '' && env.CF_ZONE != ''
+        shell: pwsh
+        run: |
+          $body = '{"purge_everything":true}'
+          curl.exe -fsS -X POST `
+            "https://api.cloudflare.com/client/v4/zones/$env:CF_ZONE/purge_cache" `
+            -H "Authorization: Bearer $env:CF_TOKEN" `
+            -H "Content-Type: application/json" `
+            --data $body

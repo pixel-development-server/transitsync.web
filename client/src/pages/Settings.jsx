@@ -228,7 +228,7 @@ function BackupsPanel() {
   return (
     <Panel
       title="Database backups"
-      subtitle="Point-in-time SQLite snapshots of every table"
+      subtitle="Point-in-time logical dumps of every table"
       icon="database"
       actions={
         <button type="button" className="btn btn-primary" onClick={createBackup} disabled={busy || loading}>
@@ -396,8 +396,8 @@ function SystemControlPanel() {
     >
       <div className="grid gap-3.5 sm:grid-cols-2">
         <section className="rounded-xl bg-[var(--surface-sunken)] px-4 py-3.5">
-          <div className="flex items-start justify-between gap-3">
-            <div>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
               <h4 className="text-[0.82rem] font-semibold text-mist-100">Global emergency lockout</h4>
               <p className="mt-0.5 text-[0.72rem] leading-relaxed text-mist-500">
                 {state?.locked
@@ -429,8 +429,8 @@ function SystemControlPanel() {
         </section>
 
         <section className="rounded-xl bg-[var(--surface-sunken)] px-4 py-3.5">
-          <div className="flex items-start justify-between gap-3">
-            <div>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
               <h4 className="text-[0.82rem] font-semibold text-mist-100">Campus maintenance mode</h4>
               <p className="mt-0.5 text-[0.72rem] leading-relaxed text-mist-500">
                 {user?.institutionName ? (
@@ -500,8 +500,8 @@ function SystemControlPanel() {
         </section>
 
         <section className="rounded-xl bg-[var(--surface-sunken)] px-4 py-3.5 sm:col-span-2">
-          <div className="flex items-start justify-between gap-3">
-            <div>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
               <h4 className="text-[0.82rem] font-semibold text-mist-100">Session &amp; password override</h4>
               <p className="mt-0.5 text-[0.72rem] leading-relaxed text-mist-500">
                 Force a password reset on any staff member — including peers and other System Administrators — without
@@ -696,9 +696,9 @@ export default function Settings() {
               { label: 'Permissions', value: system.permissions },
               { label: 'Roles', value: system.roles },
             ].map((entry) => (
-              <div key={entry.label} className="rounded-xl bg-[var(--surface-sunken)] px-3 py-2.5">
+              <div key={entry.label} className="min-w-0 rounded-xl bg-[var(--surface-sunken)] px-3 py-2.5">
                 <dt className="text-[0.64rem] tracking-[0.06em] text-mist-500 uppercase">{entry.label}</dt>
-                <dd className="mt-0.5 truncate text-[0.86rem] font-bold text-mist-100">{entry.value}</dd>
+                <dd className="mt-0.5 text-[0.86rem] font-bold text-mist-100 break-words">{entry.value}</dd>
               </div>
             ))}
           </dl>

@@ -274,7 +274,7 @@ export function DonutChart({ data, nameKey = 'name', valueKey = 'value', height 
   const theme = useChartTheme();
 
   return (
-    <div className="relative">
+    <div className="relative w-full min-w-0">
       <ResponsiveContainer width="100%" height={height}>
         <PieChart>
           <Tooltip {...tooltipProps({}, theme.cursor)} />
@@ -310,7 +310,7 @@ export function RadialGauge({ value = 0, max = 100, label, height = 190, color =
   const data = [{ name: label ?? 'Value', value: Number(value) || 0 }];
 
   return (
-    <div className="relative">
+    <div className="relative w-full min-w-0">
       <ResponsiveContainer width="100%" height={height}>
         <RadialBarChart
           data={data}
@@ -369,10 +369,10 @@ export function Sparkline({ data, dataKey, color = CHART_COLORS[0], height = 44 
 export function ChartFrame({ children, height = 260, empty, isEmpty }) {
   if (isEmpty) {
     return (
-      <div className="grid place-items-center text-[0.78rem] text-mist-500" style={{ height }}>
+      <div className="grid min-w-0 place-items-center px-2 text-center text-[0.78rem] leading-snug text-mist-500" style={{ height }}>
         {empty ?? 'No data in this range.'}
       </div>
     );
   }
-  return <div style={{ height }}>{children}</div>;
+  return <div className="w-full min-w-0" style={{ height }}>{children}</div>;
 }

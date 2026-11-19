@@ -18,14 +18,17 @@ const TENANT = '11111111-1111-4111-8111-111111111111';
 const STUDENT_PASSWORD = 'Marble7!FalconRidge';
 
 /** Drop a roster row in directly — the portal reads `students`, not `users`. */
-function addRosterStudent({ email, name = 'Rider Test', status = 'ACTIVE', claimed = 0 }) {
-  const result = db
-    .prepare(
-      `INSERT INTO students
-         (full_name, college_id, email, rfid_status, card_status, status, tenant_id, created_at, updated_at)
-       VALUES (?, ?, ?, 'ACTIVE', 'ACTIVE', ?, ?, datetime('now'), datetime('now'))`,
-    )
-    .run(name, `TST${Math.floor(Math.random() * 1_000_000)}`, email, status, TENANT);
+async function addRosterStudent({ email, name = 'Rider Test', status = 'ACTIVE', claimed = 0 }) {
+  const result = await db.run(
+    `INSERT INTO students
+       (full_name, college_id, email, rfid_status, card_status, status, tenant_id, created_at, updated_at)
+     VALUES (?, ?, ?, 'ACTIVE', 'ACTIVE', ?, ?, NOW(), NOW())`,
+    name,
+    `TST${Math.floor(Math.random() * 1_000_000)}`,
+    email,
+    status,
+    TENANT,
+  );
   return Number(result.lastInsertRowid);
 }
 
@@ -40,7 +43,7 @@ test('an unknown student email is not found', async () => {
 });
 
 test('a pre-authorized roster email is offered password creation', async () => {
-  addRosterStudent({ email: 'rider.one@kmi.edu.np', name: 'Rider One' });
+  await addRosterStudent({ email: 'rider.one@kmi.edu.np', name: 'Rider One' });
 
   const response = await call(ctx, 'POST', '/api/auth/student-check-email', {
     body: { email: 'rider.one@kmi.edu.np' },
@@ -72,9 +75,7 @@ test('claiming a roster row creates a level-1 student account and links it', asy
   assert.equal(response.body.data.user.roleLevel, 1);
   riderToken = response.body.data.token;
 
-  const row = db
-    .prepare('SELECT user_id FROM students WHERE email = ?')
-    .get('rider.one@kmi.edu.np');
+  const row = await db.get('SELECT user_id FROM students WHERE email = ?', 'rider.one@kmi.edu.np');
   assert.ok(row.user_id, 'the roster row should link to its new user');
 });
 
@@ -103,7 +104,7 @@ test('the portal boundary is enforced in both directions', async () => {
   const intoConsole = await call(ctx, 'GET', '/api/users', { token: riderToken });
   assert.equal(intoConsole.status, 403);
 
-  insertUser(ctx, {
+  await insertUser(ctx, {
     email: 'boundary.staff@transitsync.edu.np',
     password: 'TransitStaff@2024',
     fullName: 'Boundary Staff',
@@ -116,14 +117,58 @@ test('the portal boundary is enforced in both directions', async () => {
   assert.equal(intoPortal.body.error.code, 'STUDENT_ONLY');
 });
 
+test('login enforces cross-portal boundaries', async () => {
+  // Student must use the student portal (not the staff portal).
+  const badStaff = await call(ctx, 'POST', '/api/auth/login', {
+    body: {
+      email: 'rider.one@kmi.edu.np',
+      password: STUDENT_PASSWORD,
+      portalType: 'staff',
+    },
+  });
+  assert.equal(badStaff.status, 403);
+  assert.equal(badStaff.body?.error?.code, 'STUDENT_PORTAL_REQUIRED');
+
+  // Student can sign in via the student portal.
+  const ok = await call(ctx, 'POST', '/api/auth/login', {
+    body: {
+      email: 'rider.one@kmi.edu.np',
+      password: STUDENT_PASSWORD,
+      portalType: 'student',
+    },
+  });
+  assert.equal(ok.status, 200);
+
+  // Staff created earlier: must use staff portal, not student.
+  const badStudent = await call(ctx, 'POST', '/api/auth/login', {
+    body: {
+      email: 'boundary.staff@transitsync.edu.np',
+      password: 'TransitStaff@2024',
+      portalType: 'student',
+    },
+  });
+  assert.equal(badStudent.status, 403);
+  assert.equal(badStudent.body?.error?.code, 'STAFF_PORTAL_REQUIRED');
+
+  // Staff login via staff portal succeeds.
+  const staffOk = await call(ctx, 'POST', '/api/auth/login', {
+    body: {
+      email: 'boundary.staff@transitsync.edu.np',
+      password: 'TransitStaff@2024',
+      portalType: 'staff',
+    },
+  });
+  assert.equal(staffOk.status, 200);
+});
+
 test('the student can sign in normally afterwards', async () => {
-  const session = await login(ctx, 'rider.one@kmi.edu.np', STUDENT_PASSWORD);
+  const session = await login(ctx, 'rider.one@kmi.edu.np', STUDENT_PASSWORD, 'student');
   assert.equal(session.user.role, 'student');
   assert.equal(session.mustChangePassword, false);
 });
 
 test('a withdrawn rider cannot claim the portal', async () => {
-  addRosterStudent({ email: 'rider.gone@kmi.edu.np', name: 'Gone Rider', status: 'WITHDRAWN' });
+  await addRosterStudent({ email: 'rider.gone@kmi.edu.np', name: 'Gone Rider', status: 'WITHDRAWN' });
 
   const response = await call(ctx, 'POST', '/api/auth/student-check-email', {
     body: { email: 'rider.gone@kmi.edu.np' },

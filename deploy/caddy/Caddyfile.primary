@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------------------
+# TransitSync — PRIMARY origin (Caddy v2)
+#
+# Runs next to the Node API on the self-hosted/VPS box. The edge (Cloudflare
+# Load Balancer or Worker) talks to this listener; no ACME or inbound port is
+# needed when the edge terminates TLS.
+#
+# Validate: caddy validate --config deploy/caddy/Caddyfile.primary
+# Run     : caddy run --config deploy/caddy/Caddyfile.primary
+#
+# Override paths/ports with environment variables, e.g. on Windows:
+#   $env:SITE_ROOT='C:/SYP/client/dist'; $env:ORIGIN_LISTEN='127.0.0.1:8080'
+# ---------------------------------------------------------------------------
+
+{$ORIGIN_LISTEN:127.0.0.1:8080} {
+	# --- API + SSE (includes the health probe used by the edge) --------------
+	handle /api/* {
+		reverse_proxy {$API_UPSTREAM:127.0.0.1:3100} {
+			# TLS is terminated at the edge; tell Express so cookies get `Secure`.
+			header_up X-Forwarded-Proto https
+			flush_interval -1
+		}
+	}
+
+	handle /socket.io/* {
+		reverse_proxy {$API_UPSTREAM:127.0.0.1:3100} {
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	# --- Fingerprinted assets: safe to cache forever -------------------------
+	@immutable path *.js *.css *.png *.svg *.ico *.jpg *.jpeg *.webp *.woff *.woff2
+	handle @immutable {
+		root * {$SITE_ROOT:/srv/transitsync/client/dist}
+		header Cache-Control "public, max-age=31536000, immutable"
+		encode gzip
+		file_server
+	}
+
+	# --- SPA shell and everything else: never cached -------------------------
+	handle {
+		root * {$SITE_ROOT:/srv/transitsync/client/dist}
+		header Cache-Control "no-store"
+		encode gzip
+		try_files {path} {path}/ /index.html
+		file_server
+	}
+}

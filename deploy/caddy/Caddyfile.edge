@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# TransitSync — OPTIONAL edge reverse proxy with active health-checked failover
+#
+# Use this only when you terminate TLS yourself on a small always-on edge box
+# instead of Cloudflare Load Balancing / the Worker in deploy/cloudflare/.
+# The edge box must stay online when the primary app server is down — otherwise
+# there is nobody left to perform the failover (prefer Cloudflare for that).
+#
+# Validate: caddy validate --config deploy/caddy/Caddyfile.edge
+# Run     : caddy run --config deploy/caddy/Caddyfile.edge
+#
+# PRIMARY_UPSTREAM  = the Caddy/Node origin, e.g. 10.0.0.5:8080
+# FALLBACK_UPSTREAM = a reverse proxy to GitHub Pages, e.g. 10.0.0.6:443
+# ---------------------------------------------------------------------------
+
+transitsync.me {
+	# API: primary only. When it is down the app API is intentionally absent —
+	# the static fallback must never pretend to serve authentication endpoints.
+	handle /api/* {
+		reverse_proxy {$PRIMARY_UPSTREAM:127.0.0.1:3100} {
+			health_uri /api/health
+			health_interval 10s
+			health_timeout 3s
+			unhealthy_interval 5s
+			fail_duration 30s
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	handle /socket.io/* {
+		reverse_proxy {$PRIMARY_UPSTREAM:127.0.0.1:3100} {
+			health_uri /api/health
+			health_interval 10s
+			health_timeout 3s
+			fail_duration 30s
+		}
+	}
+
+	# Static UI: primary first, GitHub Pages only when the primary is down.
+	# `lb_policy first` keeps all traffic on the primary while it is healthy.
+	handle {
+		reverse_proxy {$PRIMARY_UPSTREAM:127.0.0.1:8080} {$FALLBACK_UPSTREAM:127.0.0.1:8443} {
+			lb_policy first
+			health_uri /
+			health_interval 15s
+			health_timeout 5s
+			unhealthy_interval 5s
+			fail_duration 30s
+			header_up X-Forwarded-Proto https
+		}
+		header Cache-Control "no-store"
+	}
+}

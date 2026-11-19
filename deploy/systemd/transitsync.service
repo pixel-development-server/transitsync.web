@@ -1,0 +1,40 @@
+# Primary self-hosted API service (Linux VPS).
+#
+# Install:
+#   sudo install -m 0644 deploy/systemd/transitsync.service /etc/systemd/system/transitsync.service
+#   sudo install -d -m 0750 /etc/transitsync
+#   sudo install -m 0600 /dev/null /etc/transitsync/transitsync.env   # fill with secrets
+#   sudo systemctl daemon-reload && sudo systemctl enable --now transitsync
+#   sudo systemctl status transitsync && curl -fsS localhost:3100/api/health
+#
+# The API auto-runs migrations on boot, so no separate migrate step is needed.
+# `server/.env` is git-ignored; values in EnvironmentFile take precedence
+# (dotenv is loaded with override:false). Keep Google config here on the
+# primary only: ENABLE_GOOGLE_AUTH=true + GOOGLE_CLIENT_ID=...
+#
+[Unit]
+Description=TransitSync API (Node.js)
+Documentation=https://github.com/pixel-development-server/transitsync.web
+After=network-online.target mysql.service mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=transitsync
+Group=transitsync
+WorkingDirectory=/srv/transitsync/server
+EnvironmentFile=/etc/transitsync/transitsync.env
+ExecStart=/usr/bin/node /srv/transitsync/server/src/index.js
+Restart=always
+RestartSec=5
+# The API drains SSE clients for up to 5s before exiting.
+TimeoutStopSec=12
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=transitsync
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

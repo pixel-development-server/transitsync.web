@@ -355,7 +355,7 @@ export default function Setup() {
                       {strength.checks.map((check) => (
                         <span
                           key={check.id}
-                          className={`h-1.5 rounded-full transition-colors duration-200 ${
+                          className={`h-1.5 rounded-full transition-colors duration-100 ${
                             check.ok ? meter.bar : 'bg-[var(--color-ink-700)]'
                           }`}
                         />

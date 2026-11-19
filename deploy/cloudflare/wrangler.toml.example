@@ -1,0 +1,22 @@
+# Cloudflare Worker edge router for TransitSync.
+# Copy to wrangler.toml (in this directory), fill in the two origins, then:
+#   npx wrangler deploy
+#   npx wrangler route put "transitsync.me/*" transitsync-edge
+#
+# PRIMARY_ORIGIN must be a hostname that is NOT matched by that route, otherwise
+# the Worker will fetch itself. Use a dedicated origin hostname (tunnel or A
+# record) that bypasses the Worker, e.g. origin.transitsync.me.
+#
+# Alternatively, create the same bindings in the Cloudflare dashboard:
+#   Workers & Pages -> transitsync-edge -> Settings -> Variables.
+
+name = "transitsync-edge"
+main = "failover-worker.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+PRIMARY_ORIGIN = "https://origin.transitsync.me"
+FALLBACK_ORIGIN = "https://pixel-development-server.github.io/transitsync.web"
+
+# No secrets are needed by the Worker. Keep Google OAuth configuration on the
+# primary server only; the fallback build has no Google code.

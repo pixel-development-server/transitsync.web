@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { Icon } from '../components/Icon.jsx';
@@ -22,9 +22,10 @@ import {
   SegmentedControl,
   Select,
 } from '../components/form.jsx';
-import { api } from '../lib/api.js';
+import { api, download } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
 import { useApi, useDebounced, usePagination } from '../lib/hooks.js';
+import { useEventStream } from '../lib/stream.js';
 import { useToast } from '../lib/toast.jsx';
 import { formatDateTime, formatRelative } from '../lib/format.js';
 import { CampusSelect, useCampusDirectory, usePlatformScope } from '../components/CampusScope.jsx';
@@ -89,13 +90,14 @@ function StudentDialog({ open, onClose, onSaved, student, buses, routes, faculti
     setError(null);
 
     // Strict email gate: an address that cannot contain `@` (or a bare `@`
-    // without a real domain) is rejected inline. The server re-validates
-    // authoritatively. Optional field — empty stays allowed.
+    // without a real domain) is rejected inline with the same terse label the
+    // API returns, so the operator sees one consistent message. The server
+    // re-validates authoritatively. Optional field — empty stays allowed.
     const emailValue = String(form.email ?? '').trim().toLowerCase();
     if (emailValue && !EMAIL_RE.test(emailValue)) {
       setError({
         message: 'Check the highlighted fields.',
-        fieldErrors: { email: "Please enter a valid email address containing '@' (e.g., student@iic.edu.np)." },
+        fieldErrors: { email: 'Invalid mail' },
       });
       return;
     }
@@ -381,10 +383,23 @@ export default function Students() {
     params: listParams,
   });
 
+  // Any roster change made elsewhere — a create, edit, delete or CSV import —
+  // should land here without a manual refresh. The refetch is silent so the
+  // table does not flash its skeleton under the user while it reloads.
+  const canReadStudents = can('students:read');
+  const { subscribe } = useEventStream({ enabled: canReadStudents });
+  useEffect(() => {
+    if (!canReadStudents) return undefined;
+    return subscribe('student_updated', () => reload({ silent: true }));
+  }, [subscribe, canReadStudents, reload]);
+
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [deleting, setDeleting] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const importInputRef = useRef(null);
 
   const students = data?.students ?? [];
   const meta = data?.meta;
@@ -426,6 +441,57 @@ export default function Students() {
     }
   };
 
+  // Export honours whatever the operator currently has applied — the same
+  // search/status/card/onboard filters (and campus) that produced the table.
+  const exportFilters = useMemo(() => {
+    const filters = { search: debouncedSearch, status, cardStatus, onboard };
+    if (isPlatform && tenantId) filters.tenantId = tenantId;
+    return filters;
+  }, [debouncedSearch, status, cardStatus, onboard, isPlatform, tenantId]);
+
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      await download('/students/export', exportFilters, 'transitsync-students.csv');
+      toast.success('Roster exported as CSV.');
+    } catch (caught) {
+      toast.error(caught.message);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const importCsv = async (event) => {
+    const file = event.target.files?.[0];
+    // Reset the input immediately so choosing the same file twice still fires
+    // a `change` event, then read the text before yielding to the network.
+    event.target.value = '';
+    if (!file) return;
+
+    setImporting(true);
+    try {
+      const csv = await file.text();
+      const payload = await api.post('/students/import', { csv });
+      const { created = 0, updated = 0, skipped = 0, errors = [] } = payload.data ?? {};
+      const touched = created + updated;
+      toast.success(
+        `${touched} student${touched === 1 ? '' : 's'} imported — ${created} created, ${updated} updated, ${skipped} skipped.`,
+        { title: 'CSV import complete' },
+      );
+      // Surface the first problem so the operator can correct the file; the
+      // full list stays in the audit log.
+      if (errors.length) {
+        const extra = errors.length > 1 ? ` (+${errors.length - 1} more)` : '';
+        toast.warning(`Row ${errors[0].row}: ${errors[0].message}${extra}`);
+      }
+      reload({ silent: true });
+    } catch (caught) {
+      toast.error(caught.message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const columns = [
     {
       key: 'fullName',
@@ -460,6 +526,7 @@ export default function Students() {
     {
       key: 'issued',
       label: 'Issued / revoked',
+      hideBelow: 'xl',
       render: (row) => (
         <div className="min-w-0">
           {row.cardIssuedAt ? (
@@ -478,6 +545,7 @@ export default function Students() {
     {
       key: 'allocation',
       label: 'Allocation',
+      hideBelow: 'md',
       render: (row) =>
         row.routeCode || row.busCode ? (
           <div className="min-w-0">
@@ -503,6 +571,7 @@ export default function Students() {
     {
       key: 'onboard',
       label: 'Onboard',
+      hideBelow: 'lg',
       align: 'center',
       sortKey: 'onboard',
       render: (row) =>
@@ -566,18 +635,59 @@ export default function Students() {
         title="Students"
         subtitle="Bus card registry, lifecycle and shuttle allocation"
         actions={
-          can('students:create') ? (
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => {
-                setEditing(null);
-                setDialogOpen(true);
-              }}
-            >
-              <Icon name="plus" className="h-3.5 w-3.5" />
-              Register student
-            </button>
+          can('students:read') ? (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={exportCsv}
+                disabled={exporting}
+                title="Download the current roster (respecting your filters) as CSV"
+              >
+                {exporting ? (
+                  <Spinner className="h-3.5 w-3.5" />
+                ) : (
+                  <Icon name="download" className="h-3.5 w-3.5" />
+                )}
+                Export CSV
+              </button>
+              {can('students:create') ? (
+                <>
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="hidden"
+                    onChange={importCsv}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => importInputRef.current?.click()}
+                    disabled={importing}
+                    title="Bulk create or update students from a CSV file"
+                  >
+                    {importing ? (
+                      <Spinner className="h-3.5 w-3.5" />
+                    ) : (
+                      <Icon name="upload" className="h-3.5 w-3.5" />
+                    )}
+                    Import CSV
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      setEditing(null);
+                      setDialogOpen(true);
+                    }}
+                  >
+                    <Icon name="plus" className="h-3.5 w-3.5" />
+                    Register student
+                  </button>
+                </>
+              ) : null}
+            </div>
           ) : null
         }
       />
@@ -614,9 +724,9 @@ export default function Students() {
       {/* Filters */}
       <div className="card mb-4 p-3.5">
         <FilterBar onClear={filtersActive ? clearFilters : undefined}>
-          <CampusSelect isPlatform={isPlatform} colleges={colleges} value={tenantId} onChange={setTenantId} wrapperClass="w-60" />
+          <CampusSelect isPlatform={isPlatform} colleges={colleges} value={tenantId} onChange={setTenantId} wrapperClass="w-full sm:w-60" />
           <Input
-            wrapperClass="min-w-[14rem] flex-1"
+            wrapperClass="w-full min-w-0 flex-1 sm:min-w-[14rem]"
             placeholder="Search name, college ID or card…"
             icon="search"
             value={search}
@@ -624,7 +734,7 @@ export default function Students() {
             aria-label="Search students"
           />
           <Select
-            wrapperClass="w-40"
+            wrapperClass="w-full sm:w-40"
             value={status}
             onChange={(event) => setStatus(event.target.value)}
             options={['ACTIVE', 'SUSPENDED', 'GRADUATED', 'WITHDRAWN']}
@@ -632,7 +742,7 @@ export default function Students() {
             aria-label="Filter by status"
           />
           <Select
-            wrapperClass="w-40"
+            wrapperClass="w-full sm:w-40"
             value={cardStatus}
             onChange={(event) => setCardStatus(event.target.value)}
             options={CARD_STATUSES}
@@ -641,7 +751,7 @@ export default function Students() {
           />
           {buses?.buses ? (
             <Select
-              wrapperClass="w-40"
+              wrapperClass="w-full sm:w-40"
               value={busId}
               onChange={(event) => setBusId(event.target.value)}
               options={buses.buses.map((bus) => ({ value: bus.id, label: bus.code }))}
@@ -651,7 +761,7 @@ export default function Students() {
           ) : null}
           {routes?.routes ? (
             <Select
-              wrapperClass="w-40"
+              wrapperClass="w-full sm:w-40"
               value={routeId}
               onChange={(event) => setRouteId(event.target.value)}
               options={routes.routes.map((route) => ({ value: route.id, label: route.code }))}
@@ -660,7 +770,7 @@ export default function Students() {
             />
           ) : null}
           <Select
-            wrapperClass="w-36"
+            wrapperClass="w-full sm:w-36"
             value={onboard}
             onChange={(event) => setOnboard(event.target.value)}
             options={[

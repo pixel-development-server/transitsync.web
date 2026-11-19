@@ -44,10 +44,11 @@ test.after(async () => {
 // Multi-tenancy foundation (migration 005)
 // ---------------------------------------------------------------------------
 
-test('the default institution is seeded and every existing row is attached to it', () => {
-  const institution = ctx.db
-    .prepare('SELECT id, name, code, status FROM institutions WHERE code = ?')
-    .get('iic');
+test('the default institution is seeded and every existing row is attached to it', async () => {
+  const institution = await ctx.db.get(
+    'SELECT id, name, code, status FROM institutions WHERE code = ?',
+    'iic',
+  );
   assert.ok(institution, 'the iic institution should exist');
   assert.equal(institution.name, 'Itahari International College');
   assert.equal(institution.status, 'ACTIVE');
@@ -55,28 +56,32 @@ test('the default institution is seeded and every existing row is attached to it
 
   // The platform Super Administrator is cross-tenant by design and carries no
   // campus tenant; every other row belongs to the default campus.
-  const orphanUsers = ctx.db
-    .prepare(
+  const orphanUsers = (
+    await ctx.db.get(
       `SELECT COUNT(*) AS n FROM users u JOIN roles r ON r.id = u.role_id
-        WHERE r.key <> 'super_admin' AND (u.tenant_id IS NULL OR u.tenant_id <> ?)`,
+        WHERE r.\`key\` <> 'super_admin' AND (u.tenant_id IS NULL OR u.tenant_id <> ?)`,
+      IIC_TENANT,
     )
-    .get(IIC_TENANT).n;
+  ).n;
   assert.equal(orphanUsers, 0, 'campus user rows should belong to the default tenant');
 
   for (const table of ['students', 'buses', 'routes', 'scan_events', 'alerts']) {
-    const orphans = ctx.db
-      .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE tenant_id IS NULL OR tenant_id <> ?`)
-      .get(IIC_TENANT).n;
+    const orphans = (
+      await ctx.db.get(
+        `SELECT COUNT(*) AS n FROM ${table} WHERE tenant_id IS NULL OR tenant_id <> ?`,
+        IIC_TENANT,
+      )
+    ).n;
     assert.equal(orphans, 0, `every ${table} row should belong to the default tenant`);
   }
 });
 
-test('the super_admin (200) and student (1) roles are seeded', () => {
-  const superRole = ctx.db.prepare('SELECT level, is_system FROM roles WHERE key = ?').get('super_admin');
+test('the super_admin (200) and student (1) roles are seeded', async () => {
+  const superRole = await ctx.db.get('SELECT level, is_system FROM roles WHERE `key` = ?', 'super_admin');
   assert.equal(superRole.level, 200);
   assert.equal(superRole.is_system, 1);
 
-  const studentRole = ctx.db.prepare('SELECT level FROM roles WHERE key = ?').get('student');
+  const studentRole = await ctx.db.get('SELECT level FROM roles WHERE `key` = ?', 'student');
   assert.equal(studentRole.level, 1);
 });
 
@@ -191,12 +196,11 @@ test('registering a college provisions its level-100 administrator with a one-ti
   assert.ok(credentials.temporaryPassword.length >= 6);
 
   // The new administrator sits at level 100 and is tenant-scoped to the campus.
-  const adminRow = ctx.db
-    .prepare(
-      `SELECT r.level, u.tenant_id, u.force_password_reset
-         FROM users u JOIN roles r ON r.id = u.role_id WHERE u.email = ?`,
-    )
-    .get('admin@tvc.edu.np');
+  const adminRow = await ctx.db.get(
+    `SELECT r.level, u.tenant_id, u.force_password_reset
+       FROM users u JOIN roles r ON r.id = u.role_id WHERE u.email = ?`,
+    'admin@tvc.edu.np',
+  );
   assert.equal(adminRow.level, 100);
   assert.equal(adminRow.tenant_id, college.id);
   assert.equal(adminRow.force_password_reset, 1);
@@ -244,13 +248,19 @@ test('a college can be suspended and the platform overview reports figures', asy
 // ---------------------------------------------------------------------------
 // Safety interlock
 // ---------------------------------------------------------------------------
-test('maintenance cannot be enabled while no Super Administrator exists', () => {
+test('maintenance cannot be enabled while no Super Administrator exists', async () => {
   const stub = {
-    prepare() {
-      return { get: () => ({ n: 0 }), all: () => [], run: () => ({}) };
+    async get() {
+      return { n: 0 };
+    },
+    async all() {
+      return [];
+    },
+    async run() {
+      return {};
     },
   };
-  assert.throws(
+  await assert.rejects(
     () => setMaintenance(stub, { enabled: true }),
     /no Super Administrator/,
   );

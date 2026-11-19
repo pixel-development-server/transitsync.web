@@ -1,50 +1,56 @@
 /**
- * SQLite has no native date type. `datetime('now')` always yields **UTC** in the
- * form `YYYY-MM-DD HH:MM:SS`, with no zone suffix.
+ * MySQL hands back bare `YYYY-MM-DD HH:MM:SS` strings (`dateStrings: true` on
+ * the pool), and because the session timezone is `+05:45` they are **Nepal
+ * Time wall clocks** — the very shape `NOW()` stamps rows with.
  *
  * Passing that straight to `new Date()` is a trap: without an offset, V8 treats
- * it as *local* time. On any host whose clock is behind UTC the parsed instant
- * lands in the past, so a freshly issued 8-hour session compares as already
- * expired. Every comparison against a stored timestamp must therefore go
- * through here so the value is interpreted as the UTC it actually is.
+ * it as *local* time, so on a UTC host the instant lands 5:45 in the wrong
+ * direction — a freshly issued 8-hour session could compare as already expired
+ * (or as never expiring at all). Every comparison against a stored timestamp
+ * must therefore go through here so the value is read as the NPT it actually
+ * is.
+ *
+ * Values that carry an explicit zone (`Z`, `+05:45`, any ISO offset) are taken
+ * at face value, and date-only strings stay calendar dates (no shift).
  */
-export function parseSqliteDate(value) {
+export function parseNptStamp(value) {
   if (value === null || value === undefined || value === '') return null;
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
   if (typeof value === 'number') return new Date(value);
 
   const text = String(value).trim();
-  const isSqliteUtc = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(text);
+  const isBareNpt = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(text);
 
-  const parsed = new Date(isSqliteUtc ? `${text.replace(' ', 'T')}Z` : text);
+  const parsed = new Date(isBareNpt ? `${text.replace(' ', 'T')}+05:45` : text);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 /** True when `value` is a timestamp strictly in the past. `null` counts as expired. */
 export function isExpired(value, at = new Date()) {
-  const date = parseSqliteDate(value);
+  const date = parseNptStamp(value);
   if (!date) return true;
   return date.getTime() < at.getTime();
 }
 
-/** SQLite's `datetime('now')` string, for comparisons done inside SQL-free JS. */
-export function sqliteNowUtc(at = new Date()) {
-  return at.toISOString().replace('T', ' ').slice(0, 19);
+/** The wall-clock stamp shape every stored timestamp uses (`NOW()` output). */
+export function nowNptStamp(at = new Date()) {
+  return new Date(at.getTime() + NPT_OFFSET_MS).toISOString().replace('T', ' ').slice(0, 19);
 }
 
 /**
  * Nepal Time. The whole console is operated out of Kathmandu, so staff-facing
  * timestamps are rendered in NPT (UTC+5:45) rather than the server's zone.
  *
- * Storage stays UTC — every `scan_events.scan_time` is `datetime('now')` — so
- * these helpers only ever *present* an instant, they never rewrite one.
+ * Storage is NPT wall time end-to-end — `NOW()` stamps rows in `+05:45` — so
+ * these helpers only ever *present* an instant or derive a calendar day from
+ * one, they never rewrite a zone.
  */
 export const NPT_TIME_ZONE = 'Asia/Kathmandu';
 const NPT_OFFSET_MS = (5 * 60 + 45) * 60 * 1000;
 
 /** Format an instant as Nepali Time, e.g. `2026-10-09 19:14:03`. */
 export function formatNpt(value = new Date(), { seconds = true } = {}) {
-  const date = parseSqliteDate(value) ?? new Date(value);
+  const date = parseNptStamp(value) ?? new Date(value);
   if (!date || Number.isNaN(date.getTime())) return null;
   return new Intl.DateTimeFormat('en-GB', {
     timeZone: NPT_TIME_ZONE,
@@ -62,29 +68,31 @@ export function formatNpt(value = new Date(), { seconds = true } = {}) {
 
 /** Nepali calendar day (`YYYY-MM-DD`) for an instant. */
 export function nptDay(value = new Date()) {
-  const date = parseSqliteDate(value) ?? new Date(value);
+  const date = parseNptStamp(value) ?? new Date(value);
   if (!date || Number.isNaN(date.getTime())) return null;
   return new Date(date.getTime() + NPT_OFFSET_MS).toISOString().slice(0, 10);
 }
 
 /**
- * Normalise a device-supplied timestamp to a UTC SQLite string.
+ * Normalise a device-supplied timestamp to the NPT wall-clock string the
+ * tables store.
  *
  * Accepts ISO-8601 with an offset, epoch milliseconds (13 digits) or seconds
- * (10 digits), or an already-`SQLite`-shaped UTC string. Returns `null` when the
- * value is absent or unparseable, letting callers fall back to `datetime('now')`.
+ * (10 digits), or an already-bare `YYYY-MM-DD HH:MM:SS` stamp (read as NPT,
+ * so re-stamping it is a no-op). Returns `null` when the value is absent or
+ * unparseable, letting callers fall back to `NOW()`.
  */
-export function toUtcSqlite(value) {
+export function toNptStamp(value) {
   if (value === null || value === undefined || value === '') return null;
 
   let date;
   if (typeof value === 'number') {
     date = new Date(value < 1e12 ? value * 1000 : value);
   } else {
-    date = parseSqliteDate(value);
+    date = parseNptStamp(value);
   }
   if (!date || Number.isNaN(date.getTime())) return null;
-  return sqliteNowUtc(date);
+  return nowNptStamp(date);
 }
 
 const DURATION_UNITS = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
@@ -118,12 +126,12 @@ export function parseDurationMs(value, fallbackMs = 8 * 3_600_000) {
 }
 
 export default {
-  parseSqliteDate,
+  parseNptStamp,
   isExpired,
-  sqliteNowUtc,
+  nowNptStamp,
   parseDurationMs,
   formatNpt,
   nptDay,
-  toUtcSqlite,
+  toNptStamp,
   NPT_TIME_ZONE,
 };

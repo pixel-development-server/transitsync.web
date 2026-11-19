@@ -40,9 +40,10 @@ export async function verifyPassword(plain, hash) {
  * flow). Every real hash is a bcrypt string beginning `$2`, so the sentinel can
  * never match and `isPasswordSet` is a reliable "has a password" test.
  *
- * A sentinel is used rather than a nullable column because SQLite cannot drop
- * NOT NULL in place, and rebuilding `users` — which half the schema references
- * by foreign key — is not a migration to run unattended on a live database.
+ * A sentinel is used rather than a nullable column: relaxing the NOT NULL
+ * constraint would mean rebuilding `users` — which half the schema references
+ * by foreign key — and that is not a migration to run unattended on a live
+ * database.
  */
 export const PASSWORD_UNSET = '!unset';
 

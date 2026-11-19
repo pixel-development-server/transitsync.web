@@ -15,7 +15,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { getToken, API_ORIGIN } from './api.js';
+import { getToken, API_BASE } from './api.js';
 
 export function useEventStream({ enabled = true, onEvent } = {}) {
   const [status, setStatus] = useState('idle'); // idle | connecting | open | error
@@ -53,7 +53,7 @@ export function useEventStream({ enabled = true, onEvent } = {}) {
 
     const token = getToken();
     const query = token ? `?access_token=${encodeURIComponent(token)}` : '';
-    const source = new EventSource(`${API_ORIGIN}/api/stream${query}`, { withCredentials: true });
+    const source = new EventSource(`${API_BASE}/stream${query}`, { withCredentials: true });
     sourceRef.current = source;
     setStatus('connecting');
 
@@ -79,6 +79,12 @@ export function useEventStream({ enabled = true, onEvent } = {}) {
       alert: dispatch('alert'),
       occupancy: dispatch('occupancy'),
       visitor: dispatch('visitor'),
+      // CRUD fan-out — `EventSource` has no wildcard listener, so every event
+      // name the hub can emit must be declared here or it is dropped unheard.
+      student_updated: dispatch('student_updated'),
+      bus_updated: dispatch('bus_updated'),
+      route_updated: dispatch('route_updated'),
+      booking_updated: dispatch('booking_updated'),
     };
 
     for (const [event, fn] of Object.entries(bound)) source.addEventListener(event, fn);

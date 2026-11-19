@@ -26,15 +26,13 @@ router.get(
   asyncHandler(async (req, res) => {
     const db = getDb();
 
-    const buses = db
-      .prepare(
-        `SELECT b.id, b.code, b.name, b.seat_capacity, b.current_route_id,
-                r.code AS route_code,
-                (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy
-           FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id
-          WHERE b.status <> 'RETIRED' ORDER BY b.code`,
-      )
-      .all()
+    const buses = (await db.all(
+      `SELECT b.id, b.code, b.name, b.seat_capacity, b.current_route_id,
+              r.code AS route_code,
+              (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy
+         FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id
+        WHERE b.status <> 'RETIRED' ORDER BY b.code`,
+    ))
       .map((bus) => ({
         id: bus.id,
         code: bus.code,
@@ -46,16 +44,14 @@ router.get(
       }));
 
     // Curated samples — one card per outcome the engine can produce.
-    const samples = db
-      .prepare(
-        `SELECT s.id, s.full_name, s.college_id, s.rfid_serial, s.card_status,
-                s.card_issued_at, s.status, s.onboard_bus_id AS bus_id,
-                NULL AS route_id, b.code AS bus_code, NULL AS route_code
-           FROM students s LEFT JOIN buses b ON b.id = s.onboard_bus_id
-          WHERE s.rfid_serial IS NOT NULL
-          ORDER BY s.id DESC LIMIT 60`,
-      )
-      .all();
+    const samples = await db.all(
+      `SELECT s.id, s.full_name, s.college_id, s.rfid_serial, s.card_status,
+              s.card_issued_at, s.status, s.onboard_bus_id AS bus_id,
+              NULL AS route_id, b.code AS bus_code, NULL AS route_code
+         FROM students s LEFT JOIN buses b ON b.id = s.onboard_bus_id
+        WHERE s.rfid_serial IS NOT NULL
+        ORDER BY s.id DESC LIMIT 60`,
+    );
 
     const pick = (predicate, fallbackSerial) => {
       const match = samples.find(predicate);
@@ -122,12 +118,10 @@ router.get(
           Object.entries(ALERT_TYPES).map(([key, value]) => [key, { label: value.label, severity: value.severity }]),
         ),
         presets,
-        recent: db
-          .prepare(
-            `SELECT id, rfid_serial, direction, outcome, message, scan_time, occupancy_after
-               FROM scan_events ORDER BY id DESC LIMIT 12`,
-          )
-          .all(),
+        recent: await db.all(
+          `SELECT id, rfid_serial, direction, outcome, message, scan_time, occupancy_after
+             FROM scan_events ORDER BY id DESC LIMIT 12`,
+        ),
       },
     });
   }),
@@ -140,12 +134,13 @@ router.post(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const bus = req.body.busId
-      ? db.prepare('SELECT * FROM buses WHERE id = ?').get(req.body.busId)
-      : db.prepare("SELECT * FROM buses WHERE status = 'ACTIVE' ORDER BY id LIMIT 1").get();
+      ? await db.get('SELECT * FROM buses WHERE id = ?', req.body.busId)
+      : await db.get("SELECT * FROM buses WHERE status = 'ACTIVE' ORDER BY id LIMIT 1");
 
-    const student = db
-      .prepare('SELECT * FROM students WHERE UPPER(rfid_serial) = ?')
-      .get(String(req.body.rfidSerial).toUpperCase());
+    const student = await db.get(
+      'SELECT * FROM students WHERE UPPER(rfid_serial) = ?',
+      String(req.body.rfidSerial).toUpperCase(),
+    );
 
     const verdict = evaluateTap({
       student,
@@ -172,7 +167,7 @@ router.post(
   '/tap',
   validate(tapSchema),
   asyncHandler(async (req, res) => {
-    const result = processTap(req.body);
+    const result = await processTap(req.body);
     recordAudit(
       fromRequest(req, 'simulator.tap', {
         entity: 'scan_event',
@@ -200,7 +195,7 @@ router.post(
       ]);
     }
 
-    const buses = db.prepare("SELECT * FROM buses WHERE status <> 'RETIRED' ORDER BY id").all();
+    const buses = await db.all("SELECT * FROM buses WHERE status <> 'RETIRED' ORDER BY id");
     const bus = req.body.busId ? buses.find((entry) => entry.id === req.body.busId) : buses[0];
     if (!bus) {
       return res.status(409).json({
@@ -209,38 +204,58 @@ router.post(
       });
     }
 
-    const serial = (() => {
+    const serial = await (async () => {
       switch (outcome) {
         case 'VALID': {
-          const row = db
-            .prepare(
-              `SELECT rfid_serial FROM students
-                WHERE rfid_serial IS NOT NULL AND status = 'ACTIVE' AND card_status = 'ACTIVE'
-                  AND onboard_bus_id = ?
-                LIMIT 1`,
-            )
-            .get(bus.id);
+          const row = await db.get(
+            `SELECT rfid_serial FROM students
+              WHERE rfid_serial IS NOT NULL AND status = 'ACTIVE' AND card_status = 'ACTIVE'
+                AND onboard_bus_id = ?
+              LIMIT 1`,
+            bus.id,
+          );
           return row?.rfid_serial ?? 'TS-SCEN-VALID';
         }
         case 'INVALID': {
-          const row = db
-            .prepare(
-              `SELECT rfid_serial FROM students
-                WHERE rfid_serial IS NOT NULL AND (card_status = 'REVOKED' OR status <> 'ACTIVE')
-                LIMIT 1`,
-            )
-            .get();
+          const row = await db.get(
+            `SELECT rfid_serial FROM students
+              WHERE rfid_serial IS NOT NULL AND (card_status = 'REVOKED' OR status <> 'ACTIVE')
+              LIMIT 1`,
+          );
           return row?.rfid_serial ?? 'TS-SCEN-INVALID';
         }
         case 'UNREGISTERED_BUS': {
-          const row = db
-            .prepare(
+          // The verdict refuses a rider who is still aboard a *different* bus,
+          // so the fixture needs a student in exactly that state. Prefer one
+          // that already is; otherwise park a spare active card on another bus.
+          const row = await db.get(
+            `SELECT rfid_serial FROM students
+              WHERE rfid_serial IS NOT NULL AND status = 'ACTIVE' AND card_status = 'ACTIVE'
+                AND onboard_bus_id IS NOT NULL AND onboard_bus_id <> ?
+              LIMIT 1`,
+            bus.id,
+          );
+          if (row) return row.rfid_serial;
+
+          const otherBus = buses.find((entry) => entry.id !== bus.id);
+          if (otherBus) {
+            const candidate = await db.get(
               `SELECT rfid_serial FROM students
-                WHERE rfid_serial IS NOT NULL AND card_status = 'ACTIVE'
-                  AND (onboard_bus_id IS NULL OR onboard_bus_id <> ?) LIMIT 1`,
-            )
-            .get(bus.id);
-          return row?.rfid_serial ?? 'TS-SCEN-WRONGBUS';
+                WHERE rfid_serial IS NOT NULL AND status = 'ACTIVE' AND card_status = 'ACTIVE'
+                  AND (onboard_bus_id IS NULL OR onboard_bus_id <> ?)
+                ORDER BY (onboard_bus_id IS NULL) DESC, id LIMIT 1`,
+              otherBus.id,
+            );
+            if (candidate) {
+              await db.run(
+                'UPDATE students SET onboard_bus_id = ?, onboard_at = NOW() WHERE rfid_serial = ?',
+                otherBus.id,
+                candidate.rfid_serial,
+              );
+              return candidate.rfid_serial;
+            }
+          }
+          return 'TS-SCEN-WRONGBUS';
         }
         default:
           return `TS-GHOST-${Math.random().toString(16).slice(2, 8).toUpperCase()}`;
@@ -251,14 +266,13 @@ router.post(
     // where the outcome depends on student state (valid / invalid).
     if (serial.startsWith('TS-SCEN-') && outcome !== 'UNREGISTERED_BUS') {
       const scratchSerial = serial;
-      const existing = db.prepare('SELECT id FROM students WHERE rfid_serial = ?').get(scratchSerial);
-      if (existing) db.prepare('DELETE FROM students WHERE id = ?').run(existing.id);
+      const existing = await db.get('SELECT id FROM students WHERE rfid_serial = ?', scratchSerial);
+      if (existing) await db.run('DELETE FROM students WHERE id = ?', existing.id);
 
       const revoked = outcome === 'INVALID';
-      db.prepare(
+      await db.run(
         `INSERT INTO students (full_name, college_id, rfid_serial, rfid_status, card_status, status)
          VALUES (?, ?, ?, ?, ?, 'ACTIVE')`,
-      ).run(
         revoked ? 'Revoked Test Student' : 'Scenario Test Student',
         `SCEN-${scratchSerial.slice(-7)}`,
         scratchSerial,
@@ -267,7 +281,7 @@ router.post(
       );
     }
 
-    const result = processTap({
+    const result = await processTap({
       rfidSerial: serial,
       busId: bus.id,
       latitude: req.body.latitude,

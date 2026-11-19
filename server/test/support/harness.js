@@ -2,8 +2,8 @@ import process from 'node:process';
 
 // Must be set before any application module is imported — config reads it at load.
 process.env.TS_TEST = '1';
-process.env.DB_FILE = ':memory:';
 process.env.NODE_ENV = 'test';
+process.env.DB_NAME = `transitsync_test_${process.pid}`;
 
 // The suite must not depend on the developer's `server/.env`, which carries a
 // randomly generated bootstrap password. Pin both the seed passwords and the
@@ -15,7 +15,7 @@ process.env.SUPER_ADMIN_PASSWORD = 'SuperRoot!2024x';
 process.env.SUPER_ADMIN_NAME = 'Platform Super Administrator';
 process.env.JWT_SECRET = 'test-signing-secret-not-used-in-production-000000';
 
-const { openDatabase } = await import('../../src/db/driver.js');
+const { ensureDatabase, closeDb, db, pool } = await import('../../db.js');
 const { setDb, getDb } = await import('../../src/db/connection.js');
 const { runMigrations } = await import('../../src/db/migrate.js');
 const { ensureBootstrapAdmin, ensureSuperAdmin, seedDemo, seedSettings } = await import('../../src/db/seed.js');
@@ -42,19 +42,26 @@ let currentSuperPassword = SUPER_ADMIN_PASSWORD;
 let cached = null;
 
 /**
- * Boot a fully isolated instance: in-memory database, freshly migrated, seeded
- * with the bootstrap admin and the demo dataset, listening on an ephemeral port.
+ * Boot a fully isolated instance: per-process MySQL test database, freshly
+ * migrated, seeded with the bootstrap admin and the demo dataset, listening on
+ * an ephemeral port.
  */
 export async function bootServer({ demo = true } = {}) {
   if (cached) return cached;
 
-  const db = openDatabase(':memory:');
-  setDb(db);
-  runMigrations(db, { log: () => {} });
-  seedSettings(db);
-  ensureBootstrapAdmin(db);
-  ensureSuperAdmin(db);
-  if (demo) seedDemo(db);
+  // Create (or replace) the test schema for this process.
+  await ensureDatabase({ drop: true });
+
+  // `getDb()` now returns the async facade. The module-level `db` is the same
+  // facade, and `setDb` remains a no-op for compatibility.
+  const dbFacade = db;
+  setDb(dbFacade);
+
+  await runMigrations({ log: () => {} });
+  await seedSettings(dbFacade);
+  await ensureBootstrapAdmin(dbFacade);
+  await ensureSuperAdmin(dbFacade);
+  if (demo) await seedDemo(dbFacade);
 
   const app = createApp();
   const server = await new Promise((resolve) => {
@@ -63,22 +70,29 @@ export async function bootServer({ demo = true } = {}) {
 
   const { port } = server.address();
   cached = {
-    db,
+    db: dbFacade,
     app,
     server,
     port,
     baseUrl: `http://127.0.0.1:${port}`,
-    close: () =>
-      new Promise((resolve) => {
+    close: async () => {
+      await new Promise((resolve) => {
         server.close(resolve);
         server.closeAllConnections?.();
-      }),
+      });
+      try {
+        await closeDb();
+      } catch {
+        /* ignore */
+      }
+    },
   };
   return cached;
 }
 
-export function roleIdOf(context, roleKey) {
-  return context.db.prepare('SELECT id FROM roles WHERE key = ?').get(roleKey).id;
+export async function roleIdOf(context, roleKey) {
+  const row = await context.db.get('SELECT id FROM roles WHERE `key` = ?', roleKey);
+  return row.id;
 }
 
 /**
@@ -119,8 +133,10 @@ export async function call(context, method, path, { token, body, headers = {}, r
   return { status: response.status, body: parsed, headers: Object.fromEntries(response.headers.entries()) };
 }
 
-export async function login(context, email, password) {
-  const response = await call(context, 'POST', '/api/auth/login', { body: { email, password } });
+export async function login(context, email, password, portalType = 'staff') {
+  const response = await call(context, 'POST', '/api/auth/login', {
+    body: { email, password, portalType },
+  });
   if (response.status !== 200) {
     throw new Error(`Login failed for ${email}: ${response.status} ${JSON.stringify(response.body)}`);
   }
@@ -152,6 +168,23 @@ export async function loginAdmin(context) {
 
   const session = response.body.data;
   if (!session.mustChangePassword) return session;
+
+  // If forced password reset, use set-new-password flow with resetToken
+  if (session.resetToken) {
+    const rotated = await call(context, 'POST', '/api/auth/set-new-password', {
+      body: {
+        email: ADMIN_EMAIL,
+        resetToken: session.resetToken,
+        newPassword: ROTATED_ADMIN_PASSWORD,
+        confirmPassword: ROTATED_ADMIN_PASSWORD,
+      },
+    });
+    if (rotated.status !== 200) {
+      throw new Error(`Admin rotation failed: ${rotated.status} ${JSON.stringify(rotated.body)}`);
+    }
+    currentAdminPassword = ROTATED_ADMIN_PASSWORD;
+    return loginAdmin(context); // re-login cleanly
+  }
 
   const rotated = await call(context, 'POST', '/api/auth/change-password', {
     token: session.token,
@@ -190,6 +223,22 @@ export async function loginSuperAdmin(context) {
   const session = response.body.data;
   if (!session.mustChangePassword) return session;
 
+  if (session.resetToken) {
+    const rotated = await call(context, 'POST', '/api/auth/set-new-password', {
+      body: {
+        email: SUPER_ADMIN_EMAIL,
+        resetToken: session.resetToken,
+        newPassword: SUPER_ROTATED_PASSWORD,
+        confirmPassword: SUPER_ROTATED_PASSWORD,
+      },
+    });
+    if (rotated.status !== 200) {
+      throw new Error(`Super admin rotation failed: ${rotated.status} ${JSON.stringify(rotated.body)}`);
+    }
+    currentSuperPassword = SUPER_ROTATED_PASSWORD;
+    return loginSuperAdmin(context);
+  }
+
   const rotated = await call(context, 'POST', '/api/auth/change-password', {
     token: session.token,
     body: {
@@ -211,7 +260,7 @@ export async function createStaffUser(context, adminToken, overrides = {}) {
   const payload = {
     email: `staff-${Math.random().toString(36).slice(2, 8)}@transitsync.edu.np`,
     fullName: 'Test Staff',
-    roleId: roleIdOf(context, ROLE_KEYS.TRANSPORT_STAFF),
+    roleId: await roleIdOf(context, ROLE_KEYS.TRANSPORT_STAFF),
     jobTitle: 'Coordinator',
     department: 'Transport',
     temporaryPassword: 'TempPass!2024x',
@@ -229,18 +278,16 @@ export async function createStaffUser(context, adminToken, overrides = {}) {
 }
 
 /** Insert a user directly with a known password — avoids the admin round trip. */
-export function insertUser(context, { email, password, fullName, roleKey }) {
-  const db = context.db;
-  const role = db.prepare('SELECT id FROM roles WHERE key = ?').get(roleKey);
+export async function insertUser(context, { email, password, fullName, roleKey }) {
+  const role = await context.db.get('SELECT id FROM roles WHERE `key` = ?', roleKey);
   // Cost 4 keeps the suite fast; this fixture path never touches production data.
   const passwordHash = bcrypt.hashSync(password, 4);
-  const result = db
-    .prepare(
-      `INSERT INTO users (email, full_name, password_hash, role_id, status,
-                          is_first_login, password_changed, force_password_reset)
-       VALUES (?, ?, ?, ?, 'active', 0, 1, 0)`,
-    )
-    .run(email, fullName, passwordHash, role.id);
+  const result = await context.db.run(
+    `INSERT INTO users (email, full_name, password_hash, role_id, status,
+                        is_first_login, password_changed, force_password_reset)
+     VALUES (?, ?, ?, ?, 'active', 0, 1, 0)`,
+    email, fullName, passwordHash, role.id,
+  );
   return Number(result.lastInsertRowid);
 }
 

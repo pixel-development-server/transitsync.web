@@ -16,6 +16,7 @@ import { useAuth } from '../lib/auth.jsx';
 import { useEventStream } from '../lib/stream.js';
 import { useToast } from '../lib/toast.jsx';
 import { formatNumber, formatTime } from '../lib/format.js';
+import { useBusStatusClock, evaluateBusStatus } from '../utils/busStatus.js';
 
 /** Severity palette for a live event, shared by the feed and the counters. */
 const OUTCOME_STYLE = {
@@ -25,6 +26,37 @@ const OUTCOME_STYLE = {
   CAPACITY_EXCEEDED: { dot: 'bg-amber-400', badge: 'warn', label: 'Bus full' },
   SYSTEM: { dot: 'bg-slate-400', badge: 'neutral', label: 'System' },
 };
+
+/**
+ * The status to show for a bus in the live monitor.
+ *
+ * Mirrors the rule used on the Fleet page: `status` is the fleet *lifecycle*
+ * state and stays authoritative unless the bus is ACTIVE, in which case the
+ * route timetable is classified against the Nepali clock so the badge ages on
+ * its own. The dashboard nests the timetable under `route`.
+ *
+ * @returns {ReturnType<typeof evaluateBusStatus>|null} null → fall back to `bus.status`
+ */
+function resolveBusStatus(bus, now) {
+  if (bus?.status === 'ACTIVE' && bus.route?.departureTime && bus.route?.arrivalTime) {
+    return evaluateBusStatus(
+      { departureTime: bus.route.departureTime, arrivalTime: bus.route.arrivalTime },
+      now,
+    );
+  }
+  return null;
+}
+
+/**
+ * Status pill for one live-monitor bus. Uses the shared `Badge` tone palette for
+ * dynamic states and falls back to `StatusBadge` for lifecycle states, keeping
+ * that component's API unchanged.
+ */
+function BusStatusBadge({ bus, now }) {
+  const dynamic = resolveBusStatus(bus, now);
+  if (dynamic) return <Badge tone={dynamic.tone} dot={false}>{dynamic.label}</Badge>;
+  return <StatusBadge status={bus.status} dot={false} />;
+}
 
 /**
  * Full-screen live operations monitor.
@@ -53,7 +85,11 @@ export default function LiveMonitor() {
     pausedRef.current = paused;
   }, [paused]);
 
-  const { data: dashboard } = useApi('/dashboard', { enabled: can('dashboard:read') });
+  const { data: dashboard, reload: reloadDashboard } = useApi('/dashboard', { enabled: can('dashboard:read') });
+
+  // One clock for the fleet panel, exactly as on the Fleet page: the badge ages
+  // every 30s without a poll or a manual reload.
+  const { now } = useBusStatusClock();
 
   const { status } = useEventStream({
     onEvent: useCallback(
@@ -80,9 +116,14 @@ export default function LiveMonitor() {
           setOccupancy(payload);
         } else if (event === 'alert') {
           toast.warning(payload?.title ? `Alert: ${payload.title}` : 'New alert raised', { duration: 6000 });
+        } else if (event === 'bus_updated' || event === 'route_updated') {
+          // A fleet CRUD write changes the dashboard's fleet monitor (status,
+          // route timetable, occupancy), so pull a fresh snapshot. The silent
+          // reload keeps the current panels on screen while the new one lands.
+          reloadDashboard({ silent: true });
         }
       },
-      [toast],
+      [toast, reloadDashboard],
     ),
   });
 
@@ -247,7 +288,7 @@ export default function LiveMonitor() {
                         <span className="mt-1.5 grid h-2 w-2 shrink-0 place-items-center rounded-full bg-amber-400" aria-hidden="true" />
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                            <p className="truncate text-[0.82rem] font-semibold text-mist-100">
+                            <p className="min-w-0 text-[0.82rem] leading-snug font-semibold text-mist-100 break-words">
                               Visitor head count
                             </p>
                             <Badge tone="warn">
@@ -260,7 +301,7 @@ export default function LiveMonitor() {
                               </span>
                             ) : null}
                           </div>
-                          <p className="mt-0.5 text-[0.73rem] text-mist-400">
+                          <p className="mt-0.5 text-[0.73rem] leading-snug text-mist-400 break-words">
                             Green button pressed{row.deviceId ? ` on ${row.deviceId}` : ''}.
                           </p>
                         </div>
@@ -284,7 +325,7 @@ export default function LiveMonitor() {
 
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                          <p className="truncate text-[0.82rem] font-semibold text-mist-100">
+                          <p className="min-w-0 text-[0.82rem] leading-snug font-semibold text-mist-100 break-words">
                             {row.studentName ?? row.rfidSerial}
                           </p>
                           {row.studentName ? (
@@ -293,10 +334,10 @@ export default function LiveMonitor() {
                             <Badge tone="accent">Unregistered</Badge>
                           )}
                         </div>
-                        <p className="mt-0.5 text-[0.73rem] text-mist-400">{row.message}</p>
+                        <p className="mt-0.5 text-[0.73rem] leading-snug text-mist-400 break-words">{row.message}</p>
                         <div className="mt-1 flex flex-wrap items-center gap-1.5">
                           <StatusBadge status={row.outcome} label={style.label} dot={false} />
-                          <span className="text-[0.68rem] text-mist-500">
+                          <span className="text-[0.68rem] leading-snug text-mist-500 break-words">
                             {row.direction === 'BOARD' ? 'Boarding' : 'Alighting'} · {row.busCode ?? 'no bus'}
                             {row.routeCode ? ` · ${row.routeCode}` : ''}
                             {row.gate ? ` · ${row.gate}` : ''}
@@ -354,7 +395,7 @@ export default function LiveMonitor() {
                           <span className="truncate text-[0.8rem] font-semibold text-mist-200">{bus.code}</span>
                           <span className="truncate text-[0.7rem] text-mist-500">{bus.name}</span>
                         </span>
-                        <StatusBadge status={bus.status} dot={false} />
+                        <BusStatusBadge bus={bus} now={now} />
                       </div>
                       <OccupancyBar occupancy={live ?? 0} capacity={bus.seatCapacity ?? 0} />
                     </li>

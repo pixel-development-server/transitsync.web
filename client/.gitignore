@@ -7,10 +7,17 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies and build output
 node_modules
 dist
 dist-ssr
 *.local
+
+# Client environment files (VITE_* values are baked into the bundle)
+.env
+.env.*
+!.env.example
+!.env.example.*
 
 # Editor directories and files
 .vscode/*
@@ -20,5 +27,5 @@ dist-ssr
 *.suo
 *.ntvs*
 *.njsproj
-*.sln
+*.nsl
 *.sw?

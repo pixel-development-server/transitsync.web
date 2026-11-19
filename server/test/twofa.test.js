@@ -249,7 +249,7 @@ test('the owner can disable two-factor with password proof', async () => {
 // Email one-time codes (no SMTP in tests: codes land on the console)
 // ---------------------------------------------------------------------------
 test('email one-time codes work for enrolment and sign-in challenges', async () => {
-  const ownerId = ctx.db.prepare('SELECT id FROM users WHERE email = ?').get(SUPER_ADMIN_EMAIL).id;
+  const ownerId = (await ctx.db.get('SELECT id FROM users WHERE email = ?', SUPER_ADMIN_EMAIL)).id;
   const hash = (code) => crypto.createHash('sha256').update(String(code).trim().toUpperCase()).digest('hex');
 
   // Begin email enrolment; delivery falls back to the server console.
@@ -264,12 +264,13 @@ test('email one-time codes work for enrolment and sign-in challenges', async () 
 
   // Plant the exact code the operator copied from the console. Set a newer
   // `created_at` explicitly so it outranks the setup-generated random code.
-  ctx.db
-    .prepare(
-      `INSERT INTO email_otp_codes (id, user_id, code_hash, purpose, expires_at, created_at)
-       VALUES (?, ?, ?, 'ENROLL_2FA', datetime('now', '+10 minutes'), datetime('now', '+1 minute'))`,
-    )
-    .run(crypto.randomUUID(), ownerId, hash('482913'));
+  await ctx.db.run(
+    `INSERT INTO email_otp_codes (id, user_id, code_hash, purpose, expires_at, created_at)
+     VALUES (?, ?, ?, 'ENROLL_2FA', DATE_ADD(NOW(), INTERVAL 10 MINUTE), DATE_ADD(NOW(), INTERVAL 1 MINUTE))`,
+    crypto.randomUUID(),
+    ownerId,
+    hash('482913'),
+  );
 
   const enabled = await call(ctx, 'POST', '/api/auth/2fa/enable', {
     token: superAdmin.token,
@@ -287,12 +288,13 @@ test('email one-time codes work for enrolment and sign-in challenges', async () 
   assert.equal(loginResponse.body.data.delivered, false);
   const challengeId = loginResponse.body.data.challengeId;
 
-  ctx.db
-    .prepare(
-      `INSERT INTO email_otp_codes (id, user_id, code_hash, purpose, expires_at, created_at)
-       VALUES (?, ?, ?, 'LOGIN_2FA', datetime('now', '+10 minutes'), datetime('now', '+1 minute'))`,
-    )
-    .run(crypto.randomUUID(), ownerId, hash('770214'));
+  await ctx.db.run(
+    `INSERT INTO email_otp_codes (id, user_id, code_hash, purpose, expires_at, created_at)
+     VALUES (?, ?, ?, 'LOGIN_2FA', DATE_ADD(NOW(), INTERVAL 10 MINUTE), DATE_ADD(NOW(), INTERVAL 1 MINUTE))`,
+    crypto.randomUUID(),
+    ownerId,
+    hash('770214'),
+  );
 
   const verified = await call(ctx, 'POST', '/api/auth/2fa/verify', {
     body: { challengeId, code: '770214' },

@@ -95,7 +95,7 @@ export const MODULES = [
   {
     key: 'backup',
     label: 'Database Backup',
-    description: 'Trigger and download SQLite snapshots of the operational database.',
+    description: 'Trigger and download logical dumps of the operational database.',
     actions: [{ action: 'create', label: 'Create Backup' }],
   },
   {
@@ -135,6 +135,45 @@ export const ROLE_KEYS = {
   ATTENDANT: 'attendant',
   STUDENT: 'student',
 };
+
+/**
+ * Sign-in portals.
+ *
+ * A principal may only mint a session through its own portal, so an operations
+ * credential can never yield a rider session and a rider credential can never
+ * yield an operations session. The boundary is deliberately
+ * `student` vs. everything-else rather than a fixed staff allowlist: colleges
+ * can define custom staff roles through the Roles module, and every one of them
+ * belongs to the staff console — only the built-in `student` role is a rider.
+ */
+export const PORTAL_KEYS = {
+  STAFF: 'staff',
+  STUDENT: 'student',
+};
+
+/** The portal each built-in role signs in through. */
+const PORTAL_BY_ROLE = {
+  [ROLE_KEYS.SUPER_ADMIN]: PORTAL_KEYS.STAFF,
+  [ROLE_KEYS.SYSTEM_ADMIN]: PORTAL_KEYS.STAFF,
+  [ROLE_KEYS.ADMIN]: PORTAL_KEYS.STAFF,
+  [ROLE_KEYS.TRANSPORT_STAFF]: PORTAL_KEYS.STAFF,
+  [ROLE_KEYS.ATTENDANT]: PORTAL_KEYS.STAFF,
+  [ROLE_KEYS.STUDENT]: PORTAL_KEYS.STUDENT,
+};
+
+/**
+ * The portal a role belongs to. Any role that is not `student` is an operations
+ * (staff) role, so a custom role added by a college still signs in at the staff
+ * console instead of being locked out.
+ */
+export function portalForRole(roleKey) {
+  return PORTAL_BY_ROLE[roleKey] ?? PORTAL_KEYS.STAFF;
+}
+
+/** True when `roleKey` may sign in through `portalType`. */
+export function roleAllowedInPortal(roleKey, portalType) {
+  return portalForRole(roleKey) === portalType;
+}
 
 /**
  * The platform-owner level. Everything at or above this level is a Super
@@ -246,6 +285,9 @@ export default {
   PERMISSION_INDEX,
   ROLE_KEYS,
   ROLE_DEFAULTS,
+  PORTAL_KEYS,
+  portalForRole,
+  roleAllowedInPortal,
   NAV_PERMISSION,
   isValidPermission,
   permissionKey,

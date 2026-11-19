@@ -144,38 +144,34 @@ busesRouter.get(
     // Campus isolation: campus staff see their own campus, platform principals
     // only what they explicitly drill into via `tenantId`. The summary queries
     // read unaliased tables, so they get an unaliased scope of their own.
-    const scope = operationalTenantScope(db, req.user, req.query, 'b');
-    const scopeFlat = operationalTenantScope(db, req.user, req.query);
+    const scope = await operationalTenantScope(db, req.user, req.query, 'b');
+    const scopeFlat = await operationalTenantScope(db, req.user, req.query);
     clauses.push(scope.clause);
     params.push(...scope.params);
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-    const rows = db
-      .prepare(
-        `SELECT b.*, r.code AS route_code, r.name AS route_name, r.color AS route_color,
-                r.shift AS route_shift, r.departure_time, r.arrival_time,
-                (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy,
-                0 AS assigned_students
-           FROM buses b
-           LEFT JOIN routes r ON r.id = b.current_route_id
-           ${where}
-          ORDER BY b.code ASC`,
-      )
-      .all(...params);
+    const rows = await db.all(
+      `SELECT b.*, r.code AS route_code, r.name AS route_name, r.color AS route_color,
+              r.shift AS route_shift, r.departure_time, r.arrival_time,
+              (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy,
+              0 AS assigned_students
+         FROM buses b
+         LEFT JOIN routes r ON r.id = b.current_route_id
+         ${where}
+        ORDER BY b.code ASC`,
+      ...params,
+    );
 
-    const totals = db
-      .prepare(
-        `SELECT COUNT(*) AS total,
-                SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
-                SUM(CASE WHEN status = 'MAINTENANCE' THEN 1 ELSE 0 END) AS maintenance,
-                SUM(seat_capacity) AS capacity
-           FROM buses WHERE ${scopeFlat.clause}`,
-      )
-      .get(...scopeFlat.params);
+    const totals = await db.get(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
+              SUM(CASE WHEN status = 'MAINTENANCE' THEN 1 ELSE 0 END) AS maintenance,
+              SUM(seat_capacity) AS capacity
+         FROM buses WHERE ${scopeFlat.clause}`,
+      ...scopeFlat.params,
+    );
 
-    const onboard = db
-      .prepare(`SELECT COUNT(*) AS n FROM students WHERE onboard_bus_id IS NOT NULL AND ${scopeFlat.clause}`)
-      .get(...scopeFlat.params).n;
+    const onboard = (await db.get(`SELECT COUNT(*) AS n FROM students WHERE onboard_bus_id IS NOT NULL AND ${scopeFlat.clause}`, ...scopeFlat.params)).n;
 
     res.json({
       success: true,
@@ -198,25 +194,23 @@ busesRouter.get(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const row = db
-      .prepare(
-        `SELECT b.*, r.code AS route_code, r.name AS route_name, r.color AS route_color,
-                r.shift AS route_shift, r.departure_time, r.arrival_time,
-                (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy,
-                0 AS assigned_students
-           FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id
-          WHERE b.id = ?`,
-      )
-      .get(id);
+    const row = await db.get(
+      `SELECT b.*, r.code AS route_code, r.name AS route_name, r.color AS route_color,
+              r.shift AS route_shift, r.departure_time, r.arrival_time,
+              (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy,
+              0 AS assigned_students
+         FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id
+        WHERE b.id = ?`,
+      id,
+    );
     if (!row) throw notFound('Bus');
     assertCampusRowVisible(req.user, row, 'Bus');
 
-    const roster = db
-      .prepare(
-        `SELECT id, full_name, college_id, rfid_serial, onboard_at
-           FROM students WHERE onboard_bus_id = ? ORDER BY onboard_at IS NULL, full_name LIMIT 100`,
-      )
-      .all(id);
+    const roster = await db.all(
+      `SELECT id, full_name, college_id, rfid_serial, onboard_at
+         FROM students WHERE onboard_bus_id = ? ORDER BY onboard_at IS NULL, full_name LIMIT 100`,
+      id,
+    );
 
     res.json({ success: true, data: { bus: shapeBus(row), roster } });
   }),
@@ -230,18 +224,18 @@ busesRouter.post(
     const db = getDb();
     const body = { ...req.body };
     if (body.currentRouteId) {
-      const route = db.prepare('SELECT id FROM routes WHERE id = ?').get(body.currentRouteId);
+      const route = await db.get('SELECT id FROM routes WHERE id = ?', body.currentRouteId);
       if (!route) throw unprocessable('Unknown route.', [{ field: 'currentRouteId', message: 'Pick a valid route.' }]);
     }
 
-    const dupCode = db.prepare('SELECT id FROM buses WHERE code = ?').get(body.code);
+    const dupCode = await db.get('SELECT id FROM buses WHERE code = ?', body.code);
     if (dupCode) {
       throw conflict(`A bus with the code "${body.code}" already exists.`, [
         { field: 'code', message: `A bus with the code "${body.code}" already exists.` },
       ]);
     }
     const dupReg = body.registrationNo
-      ? db.prepare('SELECT id FROM buses WHERE registration_no = ?').get(body.registrationNo)
+      ? await db.get('SELECT id FROM buses WHERE registration_no = ?', body.registrationNo)
       : null;
     if (dupReg) {
       throw conflict('A bus with this registration number already exists.', [
@@ -249,22 +243,28 @@ busesRouter.post(
       ]);
     }
 
-    const columns = { ...toColumns(body, BUS_COLUMNS), tenant_id: resolveOperationalTenant(db, req.user, body) };
+    const columns = { ...toColumns(body, BUS_COLUMNS), tenant_id: await resolveOperationalTenant(db, req.user, body) };
     const keys = Object.keys(columns);
-    const result = db
-      .prepare(`INSERT INTO buses (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`)
-      .run(...keys.map((key) => columns[key]));
+    const result = await db.run(
+      `INSERT INTO buses (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`,
+      ...keys.map((key) => columns[key]),
+    );
 
     recordAudit(fromRequest(req, 'bus.create', { entity: 'bus', entityId: Number(result.lastInsertRowid), detail: { code: body.code } }));
 
-    const row = db
-      .prepare(
-        `SELECT b.*, r.code AS route_code, r.name AS route_name FROM buses b
-           LEFT JOIN routes r ON r.id = b.current_route_id WHERE b.id = ?`,
-      )
-      .get(Number(result.lastInsertRowid));
+    const row = await db.get(
+      `SELECT b.*, r.code AS route_code, r.name AS route_name FROM buses b
+         LEFT JOIN routes r ON r.id = b.current_route_id WHERE b.id = ?`,
+      Number(result.lastInsertRowid),
+    );
 
-    res.status(201).json({ success: true, data: { bus: shapeBus({ ...row, occupancy: 0, assigned_students: 0 }) } });
+    const bus = shapeBus({ ...row, occupancy: 0, assigned_students: 0 });
+    // CRUD fan-out. `fleet:read` gates the `buses` channel (see realtime.js), so
+    // only users allowed to list the fleet ever hear about a new bus. Payloads
+    // ride the same shape the REST list returns, so a client can merge the row
+    // straight into its table without a follow-up fetch.
+    hub.broadcast('buses', 'bus_updated', { action: 'created', bus }, row.tenant_id ?? null);
+    res.status(201).json({ success: true, data: { bus } });
   }),
 );
 
@@ -276,18 +276,18 @@ busesRouter.patch(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const existing = db.prepare('SELECT * FROM buses WHERE id = ?').get(id);
+    const existing = await db.get('SELECT * FROM buses WHERE id = ?', id);
     if (!existing) throw notFound('Bus');
     assertCampusRowVisible(req.user, existing, 'Bus');
 
     const body = { ...req.body };
     if (body.currentRouteId) {
-      const route = db.prepare('SELECT id FROM routes WHERE id = ?').get(body.currentRouteId);
+      const route = await db.get('SELECT id FROM routes WHERE id = ?', body.currentRouteId);
       if (!route) throw unprocessable('Unknown route.', [{ field: 'currentRouteId', message: 'Pick a valid route.' }]);
     }
 
     if (body.code !== undefined) {
-      const dup = db.prepare('SELECT id FROM buses WHERE code = ? AND id <> ?').get(body.code, id);
+      const dup = await db.get('SELECT id FROM buses WHERE code = ? AND id <> ?', body.code, id);
       if (dup) {
         throw conflict(`A bus with the code "${body.code}" already exists.`, [
           { field: 'code', message: `A bus with the code "${body.code}" already exists.` },
@@ -295,7 +295,7 @@ busesRouter.patch(
       }
     }
     if (body.registrationNo !== undefined) {
-      const dup = db.prepare('SELECT id FROM buses WHERE registration_no = ? AND id <> ?').get(body.registrationNo, id);
+      const dup = await db.get('SELECT id FROM buses WHERE registration_no = ? AND id <> ?', body.registrationNo, id);
       if (dup) {
         throw conflict('A bus with this registration number already exists.', [
           { field: 'registrationNo', message: `"${body.registrationNo}" is already registered to another bus.` },
@@ -315,25 +315,31 @@ busesRouter.patch(
       }
     }
 
-    db.prepare(
+    await db.run(
       `UPDATE buses SET ${Object.keys(columns).map((key) => `${key} = ?`).join(', ')},
-                        updated_at = datetime('now') WHERE id = ?`,
-    ).run(...Object.values(columns), id);
+                        updated_at = NOW() WHERE id = ?`,
+      ...Object.values(columns), id,
+    );
 
     recordAudit(fromRequest(req, 'bus.update', { entity: 'bus', entityId: id, detail: { fields: Object.keys(columns) } }));
 
-    const row = db
-      .prepare(
-        `SELECT b.*, r.code AS route_code, r.name AS route_name, r.color AS route_color,
-                r.shift AS route_shift, r.departure_time, r.arrival_time,
-                (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy,
-                0 AS assigned_students
-           FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id WHERE b.id = ?`,
-      )
-      .get(id);
+    const row = await db.get(
+      `SELECT b.*, r.code AS route_code, r.name AS route_name, r.color AS route_color,
+              r.shift AS route_shift, r.departure_time, r.arrival_time,
+              (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy,
+              0 AS assigned_students
+         FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id WHERE b.id = ?`,
+      id,
+    );
 
-    hub.broadcast('fleet', 'fleet:update', { busId: id, code: row.code, occupancy: row.occupancy, capacity: row.seat_capacity });
-    res.json({ success: true, data: { bus: shapeBus(row) } });
+    hub.broadcast('fleet', 'fleet:update', { busId: id, code: row.code, occupancy: row.occupancy, capacity: row.seat_capacity }, row.tenant_id ?? null);
+
+    const bus = shapeBus(row);
+    // Keep the existing occupancy fan-out above (widgets listen to `fleet`), and
+    // add the CRUD channel the list views subscribe to so their rows refresh
+    // instantly instead of waiting for the next poll.
+    hub.broadcast('buses', 'bus_updated', { action: 'updated', bus }, row.tenant_id ?? null);
+    res.json({ success: true, data: { bus } });
   }),
 );
 
@@ -344,7 +350,7 @@ busesRouter.delete(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const bus = db.prepare('SELECT * FROM buses WHERE id = ?').get(id);
+    const bus = await db.get('SELECT * FROM buses WHERE id = ?', id);
     if (!bus) throw notFound('Bus');
     assertCampusRowVisible(req.user, bus, 'Bus');
 
@@ -355,8 +361,10 @@ busesRouter.delete(
       );
     }
 
-    db.prepare('DELETE FROM buses WHERE id = ?').run(id);
+    await db.run('DELETE FROM buses WHERE id = ?', id);
     recordAudit(fromRequest(req, 'bus.delete', { entity: 'bus', entityId: id, detail: { code: bus.code } }));
+    // A deleted row only needs identity — clients drop it rather than merge.
+    hub.broadcast('buses', 'bus_updated', { action: 'deleted', bus: { id, code: bus.code } }, bus.tenant_id ?? null);
     res.json({ success: true, data: { message: `${bus.code} removed from the fleet.` } });
   }),
 );
@@ -385,21 +393,20 @@ routesRouter.get(
     }
     // Campus isolation: campus staff see their own campus, platform principals
     // only what they explicitly drill into via `tenantId`.
-    const scope = operationalTenantScope(db, req.user, req.query, 'r');
+    const scope = await operationalTenantScope(db, req.user, req.query, 'r');
     clauses.push(scope.clause);
     params.push(...scope.params);
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-    const rows = db
-      .prepare(
-        `SELECT r.*,
-                (SELECT COUNT(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stop_count,
-                (SELECT COUNT(*) FROM buses b WHERE b.current_route_id = r.id) AS bus_count,
-                0 AS student_count
-           FROM routes r ${where}
-          ORDER BY r.code ASC`,
-      )
-      .all(...params);
+    const rows = await db.all(
+      `SELECT r.*,
+              (SELECT COUNT(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stop_count,
+              (SELECT COUNT(*) FROM buses b WHERE b.current_route_id = r.id) AS bus_count,
+              0 AS student_count
+         FROM routes r ${where}
+        ORDER BY r.code ASC`,
+      ...params,
+    );
 
     res.json({ success: true, data: { routes: rows.map(shapeRoute) } });
   }),
@@ -411,28 +418,24 @@ routesRouter.get(
   validate(idSchema, 'params'),
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const row = db
-      .prepare(
-        `SELECT r.*,
-                (SELECT COUNT(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stop_count,
-                (SELECT COUNT(*) FROM buses b WHERE b.current_route_id = r.id) AS bus_count,
-                0 AS student_count
-           FROM routes r WHERE r.id = ?`,
-      )
-      .get(Number(req.params.id));
+    const row = await db.get(
+      `SELECT r.*,
+              (SELECT COUNT(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stop_count,
+              (SELECT COUNT(*) FROM buses b WHERE b.current_route_id = r.id) AS bus_count,
+              0 AS student_count
+         FROM routes r WHERE r.id = ?`,
+      Number(req.params.id),
+    );
     if (!row) throw notFound('Route');
     assertCampusRowVisible(req.user, row, 'Route');
 
-    const stops = db
-      .prepare('SELECT * FROM route_stops WHERE route_id = ? ORDER BY sequence')
-      .all(row.id);
-    const buses = db
-      .prepare(
-        `SELECT b.id, b.code, b.name, b.seat_capacity, b.status,
-                (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy
-           FROM buses b WHERE b.current_route_id = ? ORDER BY b.code`,
-      )
-      .all(row.id);
+    const stops = await db.all('SELECT * FROM route_stops WHERE route_id = ? ORDER BY sequence', row.id);
+    const buses = await db.all(
+      `SELECT b.id, b.code, b.name, b.seat_capacity, b.status,
+              (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy
+         FROM buses b WHERE b.current_route_id = ? ORDER BY b.code`,
+      row.id,
+    );
 
     res.json({
       success: true,
@@ -467,29 +470,32 @@ routesRouter.post(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const body = req.body;
-    const dupCode = db.prepare('SELECT id FROM routes WHERE code = ?').get(body.code);
+    const dupCode = await db.get('SELECT id FROM routes WHERE code = ?', body.code);
     if (dupCode) {
       throw conflict('A route with this code already exists.', [
         { field: 'code', message: `"${body.code}" is already in use by another route.` },
       ]);
     }
-    const dupName = db.prepare('SELECT id FROM routes WHERE name = ?').get(body.name);
+    const dupName = await db.get('SELECT id FROM routes WHERE name = ?', body.name);
     if (dupName) {
       throw conflict('A route with this name already exists.', [
         { field: 'name', message: `"${body.name}" is already in use by another route.` },
       ]);
     }
 
-    const columns = { ...toColumns(body, ROUTE_COLUMNS), tenant_id: resolveOperationalTenant(db, req.user, body) };
+    const columns = { ...toColumns(body, ROUTE_COLUMNS), tenant_id: await resolveOperationalTenant(db, req.user, body) };
     const keys = Object.keys(columns);
-    const result = db
-      .prepare(`INSERT INTO routes (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`)
-      .run(...keys.map((key) => columns[key]));
+    const result = await db.run(
+      `INSERT INTO routes (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`,
+      ...keys.map((key) => columns[key]),
+    );
 
     recordAudit(fromRequest(req, 'route.create', { entity: 'route', entityId: Number(result.lastInsertRowid), detail: { code: req.body.code } }));
 
-    const row = db.prepare('SELECT r.*, 0 AS stop_count, 0 AS bus_count, 0 AS student_count FROM routes r WHERE r.id = ?').get(Number(result.lastInsertRowid));
-    res.status(201).json({ success: true, data: { route: shapeRoute(row) } });
+    const row = await db.get('SELECT r.*, 0 AS stop_count, 0 AS bus_count, 0 AS student_count FROM routes r WHERE r.id = ?', Number(result.lastInsertRowid));
+    const route = shapeRoute(row);
+    hub.broadcast('routes', 'route_updated', { action: 'created', route }, row.tenant_id ?? null);
+    res.status(201).json({ success: true, data: { route } });
   }),
 );
 
@@ -501,13 +507,13 @@ routesRouter.patch(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const existing = db.prepare('SELECT * FROM routes WHERE id = ?').get(id);
+    const existing = await db.get('SELECT * FROM routes WHERE id = ?', id);
     if (!existing) throw notFound('Route');
     assertCampusRowVisible(req.user, existing, 'Route');
 
     const body = req.body;
     if (body.code !== undefined) {
-      const dup = db.prepare('SELECT id FROM routes WHERE code = ? AND id <> ?').get(body.code, id);
+      const dup = await db.get('SELECT id FROM routes WHERE code = ? AND id <> ?', body.code, id);
       if (dup) {
         throw conflict('A route with this code already exists.', [
           { field: 'code', message: `"${body.code}" is already in use by another route.` },
@@ -515,7 +521,7 @@ routesRouter.patch(
       }
     }
     if (body.name !== undefined) {
-      const dup = db.prepare('SELECT id FROM routes WHERE name = ? AND id <> ?').get(body.name, id);
+      const dup = await db.get('SELECT id FROM routes WHERE name = ? AND id <> ?', body.name, id);
       if (dup) {
         throw conflict('A route with this name already exists.', [
           { field: 'name', message: `"${body.name}" is already in use by another route.` },
@@ -526,24 +532,26 @@ routesRouter.patch(
     const columns = toColumns(body, ROUTE_COLUMNS, { partial: true });
     if (Object.keys(columns).length === 0) throw badRequest('Nothing to update.');
 
-    db.prepare(
+    await db.run(
       `UPDATE routes SET ${Object.keys(columns).map((key) => `${key} = ?`).join(', ')},
-                        updated_at = datetime('now') WHERE id = ?`,
-    ).run(...Object.values(columns), id);
+                        updated_at = NOW() WHERE id = ?`,
+      ...Object.values(columns), id,
+    );
 
     recordAudit(fromRequest(req, 'route.update', { entity: 'route', entityId: id, detail: { fields: Object.keys(columns) } }));
 
-    const row = db
-      .prepare(
-        `SELECT r.*,
-                (SELECT COUNT(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stop_count,
-                (SELECT COUNT(*) FROM buses b WHERE b.current_route_id = r.id) AS bus_count,
-                0 AS student_count
-           FROM routes r WHERE r.id = ?`,
-      )
-      .get(id);
+    const row = await db.get(
+      `SELECT r.*,
+              (SELECT COUNT(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stop_count,
+              (SELECT COUNT(*) FROM buses b WHERE b.current_route_id = r.id) AS bus_count,
+              0 AS student_count
+         FROM routes r WHERE r.id = ?`,
+      id,
+    );
 
-    res.json({ success: true, data: { route: shapeRoute(row) } });
+    const route = shapeRoute(row);
+    hub.broadcast('routes', 'route_updated', { action: 'updated', route }, row.tenant_id ?? null);
+    res.json({ success: true, data: { route } });
   }),
 );
 
@@ -554,17 +562,18 @@ routesRouter.delete(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const route = db.prepare('SELECT * FROM routes WHERE id = ?').get(id);
+    const route = await db.get('SELECT * FROM routes WHERE id = ?', id);
     if (!route) throw notFound('Route');
     assertCampusRowVisible(req.user, route, 'Route');
 
-    const buses = db.prepare('SELECT COUNT(*) AS n FROM buses WHERE current_route_id = ?').get(id).n;
+    const buses = (await db.get('SELECT COUNT(*) AS n FROM buses WHERE current_route_id = ?', id)).n;
     if (buses > 0) {
       throw conflict(`${route.code} is still referenced by ${buses} bus(es).`);
     }
 
-    db.prepare('DELETE FROM routes WHERE id = ?').run(id);
+    await db.run('DELETE FROM routes WHERE id = ?', id);
     recordAudit(fromRequest(req, 'route.delete', { entity: 'route', entityId: id, detail: { code: route.code } }));
+    hub.broadcast('routes', 'route_updated', { action: 'deleted', route: { id, code: route.code } }, route.tenant_id ?? null);
     res.json({ success: true, data: { message: `${route.code} removed.` } });
   }),
 );
@@ -578,7 +587,7 @@ routesRouter.put(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const routeId = Number(req.params.id);
-    const route = db.prepare('SELECT * FROM routes WHERE id = ?').get(routeId);
+    const route = await db.get('SELECT * FROM routes WHERE id = ?', routeId);
     if (!route) throw notFound('Route');
     assertCampusRowVisible(req.user, route, 'Route');
 
@@ -587,20 +596,22 @@ routesRouter.put(
       throw unprocessable('Stop sequence numbers must be unique.', [{ field: 'stops', message: 'Duplicate stop sequence numbers.' }]);
     }
 
-    db.transaction(() => {
-      db.prepare('DELETE FROM route_stops WHERE route_id = ?').run(routeId);
-      const insert = db.prepare(
-        `INSERT INTO route_stops (route_id, sequence, name, scheduled_time, latitude, longitude)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      );
+    await db.transaction(async () => {
+      await db.run('DELETE FROM route_stops WHERE route_id = ?', routeId);
+      const insert = `INSERT INTO route_stops (route_id, sequence, name, scheduled_time, latitude, longitude)
+         VALUES (?, ?, ?, ?, ?, ?)`;
       for (const stop of [...req.body.stops].sort((a, b) => a.sequence - b.sequence)) {
-        insert.run(routeId, stop.sequence, stop.name, stop.scheduledTime ?? null, stop.latitude ?? null, stop.longitude ?? null);
+        await db.run(insert, routeId, stop.sequence, stop.name, stop.scheduledTime ?? null, stop.latitude ?? null, stop.longitude ?? null);
       }
     });
 
     recordAudit(fromRequest(req, 'route.stops_update', { entity: 'route', entityId: routeId, detail: { count: req.body.stops.length } }));
 
-    const stops = db.prepare('SELECT * FROM route_stops WHERE route_id = ? ORDER BY sequence').all(routeId);
+    const stops = await db.all('SELECT * FROM route_stops WHERE route_id = ? ORDER BY sequence', routeId);
+    // Stops belong to a route, so a stops write is a route change to any list
+    // watching routes. Send identity only; a client that has the detail open can
+    // refetch `GET /routes/:id` for the fresh ordered stops.
+    hub.broadcast('routes', 'route_updated', { action: 'stops_updated', route: { id: routeId, code: route.code } }, route.tenant_id ?? null);
     res.json({
       success: true,
       data: {

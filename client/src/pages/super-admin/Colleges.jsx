@@ -29,7 +29,14 @@ import { useToast } from '../../lib/toast.jsx';
 import { formatDateTime, formatNumber } from '../../lib/format.js';
 
 const EMPTY = [];
-const BLANK = { name: '', code: '', adminEmail: '', adminName: '' };
+const BLANK = { name: '', code: '', adminEmail: '', adminName: '', emailDomains: '' };
+
+/** Comma/newline separated input → the normalised array the API expects. */
+const parseDomains = (value) =>
+  value
+    .split(/[\s,]+/)
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
 
 function RegisterCollegeModal({ open, onClose, onCreated }) {
   const toast = useToast();
@@ -50,6 +57,8 @@ function RegisterCollegeModal({ open, onClose, onCreated }) {
         adminEmail: form.adminEmail.trim().toLowerCase(),
       };
       if (form.adminName.trim()) body.adminName = form.adminName.trim();
+      const domains = parseDomains(form.emailDomains);
+      if (domains.length) body.emailDomains = domains;
 
       const response = await api.post('/super-admin/colleges', body);
       toast.success(`${response.data.college.name} registered.`);
@@ -115,6 +124,14 @@ function RegisterCollegeModal({ open, onClose, onCreated }) {
           placeholder="Optional"
           error={error?.fieldErrors?.adminName}
         />
+        <Input
+          label="Authorised Google email domains"
+          value={form.emailDomains}
+          onChange={set('emailDomains')}
+          placeholder="iic.edu.np, students.iic.edu.np"
+          hint="Comma-separated. The administrator's own domain is added automatically."
+          error={error?.fieldErrors?.emailDomains}
+        />
       </form>
     </Modal>
   );
@@ -171,9 +188,9 @@ function CredentialsModal({ result, onClose }) {
             ['Email', credentials.email],
             ['Temporary password', credentials.temporaryPassword],
           ].map(([label, value]) => (
-            <div key={label} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
-              <dt className="text-[0.75rem] text-mist-500">{label}</dt>
-              <dd className="font-mono text-[0.82rem] font-semibold text-mist-100">{value}</dd>
+            <div key={label} className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 px-3.5 py-2.5">
+              <dt className="shrink-0 text-[0.75rem] text-mist-500">{label}</dt>
+              <dd className="min-w-0 font-mono text-[0.82rem] font-semibold text-mist-100 break-all">{value}</dd>
             </div>
           ))}
         </dl>
@@ -195,6 +212,7 @@ function EditCollegeModal({ college, onClose, onSaved }) {
       name: college.name ?? '',
       code: college.code ?? '',
       adminEmail: college.adminEmail ?? '',
+      emailDomains: (college.emailDomains ?? []).join(', '),
     });
   }, [college]);
 
@@ -209,6 +227,7 @@ function EditCollegeModal({ college, onClose, onSaved }) {
         name: form.name.trim(),
         code: form.code.trim().toLowerCase(),
         adminEmail: form.adminEmail.trim().toLowerCase(),
+        emailDomains: parseDomains(form.emailDomains),
       });
       toast.success(`${form.name.trim()} updated.`);
       onSaved?.();
@@ -264,6 +283,15 @@ function EditCollegeModal({ college, onClose, onSaved }) {
           value={form.adminEmail}
           onChange={set('adminEmail')}
           error={error?.fieldErrors?.adminEmail}
+          disabled={busy}
+        />
+        <Input
+          label="Authorised Google email domains"
+          value={form.emailDomains}
+          onChange={set('emailDomains')}
+          placeholder="iic.edu.np, students.iic.edu.np"
+          hint="Comma-separated. The administrator's own domain is added automatically."
+          error={error?.fieldErrors?.emailDomains}
           disabled={busy}
         />
       </form>

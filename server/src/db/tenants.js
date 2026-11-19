@@ -24,16 +24,17 @@ export const TENANT_TABLES = ['users', 'students', 'buses', 'routes', 'scan_even
  * campus role; the platform-level Super Administrator is deliberately excluded
  * (it is not a campus account).
  */
-export function stampDefaultTenant(db) {
+export async function stampDefaultTenant(db) {
   for (const table of TENANT_TABLES) {
     if (table === 'users') {
-      db.prepare(
+      await db.run(
         `UPDATE users SET tenant_id = ?
           WHERE tenant_id IS NULL
-            AND role_id <> (SELECT id FROM roles WHERE key = 'super_admin')`,
-      ).run(DEFAULT_TENANT_ID);
+            AND role_id <> (SELECT id FROM roles WHERE \`key\` = 'super_admin')`,
+        DEFAULT_TENANT_ID,
+      );
     } else {
-      db.prepare(`UPDATE ${table} SET tenant_id = ? WHERE tenant_id IS NULL`).run(DEFAULT_TENANT_ID);
+      await db.run(`UPDATE ${table} SET tenant_id = ? WHERE tenant_id IS NULL`, DEFAULT_TENANT_ID);
     }
   }
 }

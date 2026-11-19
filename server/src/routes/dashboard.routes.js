@@ -4,6 +4,7 @@ import { getDb } from '../db/connection.js';
 import { asyncHandler, validate } from '../lib/http.js';
 import { requirePermission } from '../middleware/requirePermission.js';
 import { requireAuth } from '../middleware/auth.js';
+import { operationalTenantScope, operationalEventScope } from '../lib/tenantScope.js';
 import { ALERT_TYPES } from '../services/scanner.js';
 import { getVisitorTotal } from '../services/visitors.js';
 import { nptDay } from '../lib/time.js';
@@ -24,75 +25,88 @@ router.get(
   asyncHandler(async (req, res) => {
     const db = getDb();
 
-    // ---- KPI 1 & 2: students + fleet capacity -----------------------------
-    const students = db
-      .prepare(
-        `SELECT COUNT(*) AS total,
-                SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
-                SUM(CASE WHEN onboard_bus_id IS NOT NULL THEN 1 ELSE 0 END) AS onboard,
-                0 AS unallocated,
-                SUM(CASE WHEN card_status = 'UNASSIGNED' THEN 1 ELSE 0 END) AS withoutCard,
-                SUM(CASE WHEN card_status = 'ACTIVE' THEN 1 ELSE 0 END) AS activeCards,
-                SUM(CASE WHEN card_status = 'REVOKED' THEN 1 ELSE 0 END) AS revokedCards
-           FROM students`,
-      )
-      .get();
+    // Campus isolation for the WHOLE payload: a campus principal sees only its
+    // own campus; a platform principal must drill in with `?tenantId=` and
+    // otherwise sees zeroes — the same contract as the student/bus/route
+    // registries. The event tables (scan_events, alerts) additionally expose
+    // campus-neutral system rows that carry no college's records.
+    const campusScope = await operationalTenantScope(db, req.user, req.query);
+    const busScope = await operationalTenantScope(db, req.user, req.query, 'b');
+    const eventScope = await operationalEventScope(db, req.user, req.query);
+    const scanScope = await operationalEventScope(db, req.user, req.query, 'e');
+    const alertScope = await operationalEventScope(db, req.user, req.query, 'a');
 
-    const fleet = db
-      .prepare(
-        `SELECT COUNT(*) AS total,
-                SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
-                SUM(CASE WHEN status = 'MAINTENANCE' THEN 1 ELSE 0 END) AS maintenance,
-                SUM(CASE WHEN status = 'RETIRED' THEN 1 ELSE 0 END) AS retired,
-                COALESCE(SUM(CASE WHEN status = 'ACTIVE' THEN seat_capacity ELSE 0 END), 0) AS activeCapacity
-           FROM buses`,
-      )
-      .get();
+    // ---- KPI 1 & 2: students + fleet capacity -----------------------------
+    const students = await db.get(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
+              SUM(CASE WHEN onboard_bus_id IS NOT NULL THEN 1 ELSE 0 END) AS onboard,
+              0 AS unallocated,
+              SUM(CASE WHEN card_status = 'UNASSIGNED' THEN 1 ELSE 0 END) AS withoutCard,
+              SUM(CASE WHEN card_status = 'ACTIVE' THEN 1 ELSE 0 END) AS activeCards,
+              SUM(CASE WHEN card_status = 'REVOKED' THEN 1 ELSE 0 END) AS revokedCards
+         FROM students WHERE ${campusScope.clause}`,
+      ...campusScope.params,
+    );
+
+    const fleet = await db.get(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
+              SUM(CASE WHEN status = 'MAINTENANCE' THEN 1 ELSE 0 END) AS maintenance,
+              SUM(CASE WHEN status = 'RETIRED' THEN 1 ELSE 0 END) AS retired,
+              COALESCE(SUM(CASE WHEN status = 'ACTIVE' THEN seat_capacity ELSE 0 END), 0) AS activeCapacity
+         FROM buses WHERE ${campusScope.clause}`,
+      ...campusScope.params,
+    );
 
     // ---- KPI 3: open security alerts --------------------------------------
-    const alerts = db
-      .prepare(
-        `SELECT COUNT(*) AS open,
-                SUM(CASE WHEN severity = 'CRITICAL' THEN 1 ELSE 0 END) AS critical,
-                SUM(CASE WHEN severity = 'HIGH' THEN 1 ELSE 0 END) AS high,
-                SUM(CASE WHEN severity = 'MEDIUM' THEN 1 ELSE 0 END) AS medium
-           FROM alerts WHERE status IN ('OPEN', 'ACKNOWLEDGED')`,
-      )
-      .get();
+    const alerts = await db.get(
+      `SELECT COUNT(*) AS open,
+              SUM(CASE WHEN severity = 'CRITICAL' THEN 1 ELSE 0 END) AS critical,
+              SUM(CASE WHEN severity = 'HIGH' THEN 1 ELSE 0 END) AS high,
+              SUM(CASE WHEN severity = 'MEDIUM' THEN 1 ELSE 0 END) AS medium
+         FROM alerts WHERE status IN ('OPEN', 'ACKNOWLEDGED') AND ${eventScope.clause}`,
+      ...eventScope.params,
+    );
 
-    const last24h = db.prepare("SELECT COUNT(*) AS n FROM alerts WHERE created_at >= datetime('now', '-1 day')").get().n;
+    const last24h = (await db.get(
+      `SELECT COUNT(*) AS n FROM alerts WHERE created_at >= DATE_SUB(NOW(), INTERVAL 1 DAY) AND ${eventScope.clause}`,
+      ...eventScope.params,
+    )).n;
 
     // ---- KPI 4: live capacity utilisation ---------------------------------
-    const onboard = students.onboard ?? 0;
-    const activeCapacity = fleet.activeCapacity ?? 0;
+    // MySQL returns SUM(...) as a string; coerce so the utilisation comparison
+    // and arithmetic stay numeric instead of comparing lexicographically.
+    const onboard = Number(students.onboard ?? 0);
+    const activeCapacity = Number(fleet.activeCapacity ?? 0);
 
     // ---- Today's movement --------------------------------------------------
-    const today = db
-      .prepare(
-        `SELECT COUNT(*) AS total,
-                SUM(CASE WHEN direction = 'BOARD' THEN 1 ELSE 0 END) AS boards,
-                SUM(CASE WHEN direction = 'DEBOARD' THEN 1 ELSE 0 END) AS alights,
-                SUM(CASE WHEN outcome <> 'VALID' THEN 1 ELSE 0 END) AS rejected
-           FROM scan_events WHERE date(scan_time) = date('now')`,
-      )
-      .get();
+    const today = await db.get(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN direction = 'BOARD' THEN 1 ELSE 0 END) AS boards,
+              SUM(CASE WHEN direction = 'DEBOARD' THEN 1 ELSE 0 END) AS alights,
+              SUM(CASE WHEN outcome <> 'VALID' THEN 1 ELSE 0 END) AS rejected
+         FROM scan_events WHERE DATE(scan_time) = CURDATE() AND ${eventScope.clause}`,
+      ...eventScope.params,
+    );
 
     // ---- Active fleet monitor ----------------------------------------------
     const visitorDay = nptDay();
-    const fleetMonitor = db
-      .prepare(
-        `SELECT b.id, b.code, b.name, b.status, b.seat_capacity, b.current_route_id,
-                r.code AS route_code, r.name AS route_name, r.color AS route_color,
-                r.shift AS route_shift, r.departure_time, r.arrival_time,
-                b.driver_name, b.driver_phone,
-                (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy,
-                0 AS allocated,
-                (SELECT COALESCE(SUM(v.count), 0) FROM visitor_counts v
-                  WHERE v.bus_id = b.id AND v.day = ?) AS visitors
-           FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id
-          ORDER BY b.code`,
-      )
-      .all(visitorDay)
+    const fleetMonitor = (await db.all(
+      `SELECT b.id, b.code, b.name, b.status, b.seat_capacity, b.current_route_id,
+              r.code AS route_code, r.name AS route_name, r.color AS route_color,
+              r.shift AS route_shift, r.departure_time, r.arrival_time,
+              b.driver_name, b.driver_phone,
+              (SELECT COUNT(*) FROM students s WHERE s.onboard_bus_id = b.id) AS occupancy,
+              0 AS allocated,
+              (SELECT COALESCE(SUM(v.count), 0) FROM visitor_counts v
+                WHERE v.bus_id = b.id AND v.day = ?) AS visitors
+         FROM buses b LEFT JOIN routes r ON r.id = b.current_route_id
+        WHERE ${busScope.clause}
+        ORDER BY b.code`,
+      visitorDay,
+      ...busScope.params,
+    ))
       .map((bus) => {
         const occupancy = bus.occupancy ?? 0;
         return {
@@ -122,36 +136,35 @@ router.get(
       });
 
     // ---- Activity feed (bootstrap snapshot; SSE takes over) ----------------
-    const activity = db
-      .prepare(
-        `SELECT e.id, e.rfid_serial, e.student_id, e.direction, e.outcome, e.message,
-                e.scan_time, e.latitude, e.longitude, e.gate, e.occupancy_after,
-                s.full_name AS student_name, s.college_id,
-                b.code AS bus_code, b.seat_capacity, r.code AS route_code
-           FROM scan_events e
-           LEFT JOIN students s ON s.id = e.student_id
-           LEFT JOIN buses b    ON b.id = e.bus_id
-           LEFT JOIN routes r   ON r.id = e.route_id
-          ORDER BY e.id DESC LIMIT 40`,
-      )
-      .all()
+    const activity = (await db.all(
+      `SELECT e.id, e.rfid_serial, e.student_id, e.direction, e.outcome, e.message,
+              e.scan_time, e.latitude, e.longitude, e.gate, e.occupancy_after,
+              s.full_name AS student_name, s.college_id,
+              b.code AS bus_code, b.seat_capacity, r.code AS route_code
+         FROM scan_events e
+         LEFT JOIN students s ON s.id = e.student_id
+         LEFT JOIN buses b    ON b.id = e.bus_id
+         LEFT JOIN routes r   ON r.id = e.route_id
+        WHERE ${scanScope.clause}
+        ORDER BY e.id DESC LIMIT 40`,
+      ...scanScope.params,
+    ))
       .map(mapActivity);
 
     // ---- Alert panel -------------------------------------------------------
-    const recentAlerts = db
-      .prepare(
-        `SELECT a.id, a.type, a.severity, a.title, a.message, a.status, a.created_at,
-                b.code AS bus_code, s.full_name AS student_name
-           FROM alerts a
-           LEFT JOIN buses b    ON b.id = a.bus_id
-           LEFT JOIN students s ON s.id = a.student_id
-          WHERE a.status IN ('OPEN', 'ACKNOWLEDGED')
-          ORDER BY CASE a.severity WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
-                                   WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 3 ELSE 4 END,
-                   a.id DESC
-          LIMIT 12`,
-      )
-      .all()
+    const recentAlerts = (await db.all(
+      `SELECT a.id, a.type, a.severity, a.title, a.message, a.status, a.created_at,
+              b.code AS bus_code, s.full_name AS student_name
+         FROM alerts a
+         LEFT JOIN buses b    ON b.id = a.bus_id
+         LEFT JOIN students s ON s.id = a.student_id
+        WHERE a.status IN ('OPEN', 'ACKNOWLEDGED') AND ${alertScope.clause}
+        ORDER BY CASE a.severity WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+                                 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 3 ELSE 4 END,
+                 a.id DESC
+        LIMIT 12`,
+      ...alertScope.params,
+    ))
       .map((row) => ({
         id: row.id,
         type: row.type,
@@ -167,16 +180,15 @@ router.get(
       }));
 
     // ---- 7-day movement for the sparkline ---------------------------------
-    const trend = db
-      .prepare(
-        `SELECT date(scan_time) AS day,
-                SUM(CASE WHEN direction = 'BOARD' THEN 1 ELSE 0 END) AS boards,
-                SUM(CASE WHEN direction = 'DEBOARD' THEN 1 ELSE 0 END) AS alights,
-                SUM(CASE WHEN outcome <> 'VALID' THEN 1 ELSE 0 END) AS rejected
-           FROM scan_events WHERE scan_time >= datetime('now', '-6 days')
-          GROUP BY day ORDER BY day`,
-      )
-      .all();
+    const trend = await db.all(
+      `SELECT DATE(scan_time) AS day,
+              SUM(CASE WHEN direction = 'BOARD' THEN 1 ELSE 0 END) AS boards,
+              SUM(CASE WHEN direction = 'DEBOARD' THEN 1 ELSE 0 END) AS alights,
+              SUM(CASE WHEN outcome <> 'VALID' THEN 1 ELSE 0 END) AS rejected
+         FROM scan_events WHERE scan_time >= DATE_SUB(NOW(), INTERVAL 6 DAY) AND ${eventScope.clause}
+        GROUP BY day ORDER BY day`,
+      ...eventScope.params,
+    );
 
     res.json({
       success: true,
@@ -211,7 +223,7 @@ router.get(
             percent: activeCapacity ? Math.round((onboard / activeCapacity) * 100) : 0,
           },
           visitors: {
-            today: getVisitorTotal(visitorDay),
+            today: await getVisitorTotal(visitorDay, busScope),
           },
           today,
         },
@@ -260,19 +272,26 @@ router.get(
   validate(activityQuerySchema, 'query'),
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const rows = db
-      .prepare(
-        `SELECT e.id, e.rfid_serial, e.student_id, e.direction, e.outcome, e.message,
-                e.scan_time, e.latitude, e.longitude, e.gate, e.occupancy_after,
-                s.full_name AS student_name, s.college_id,
-                b.code AS bus_code, b.seat_capacity, r.code AS route_code
-           FROM scan_events e
-           LEFT JOIN students s ON s.id = e.student_id
-           LEFT JOIN buses b    ON b.id = e.bus_id
-           LEFT JOIN routes r   ON r.id = e.route_id
-          ORDER BY e.id DESC LIMIT ?`,
-      )
-      .all(req.query.limit ?? 60);
+    // Same campus rule as the bootstrap snapshot above: own campus plus
+    // campus-neutral system rows; platform needs `?tenantId=`.
+    const scope = await operationalEventScope(db, req.user, req.query, 'e');
+    const rows = await db.all(
+      `SELECT e.id, e.rfid_serial, e.student_id, e.direction, e.outcome, e.message,
+              e.scan_time, e.latitude, e.longitude, e.gate, e.occupancy_after,
+              s.full_name AS student_name, s.college_id,
+              b.code AS bus_code, b.seat_capacity, r.code AS route_code
+         FROM scan_events e
+         LEFT JOIN students s ON s.id = e.student_id
+         LEFT JOIN buses b    ON b.id = e.bus_id
+         LEFT JOIN routes r   ON r.id = e.route_id
+        WHERE ${scope.clause}
+        ORDER BY e.id DESC LIMIT ?`,
+      ...scope.params,
+      // Bound as a number: the facade switches LIMIT/OFFSET statements to the
+      // text protocol, which interpolates integers bare (strings would be
+      // quoted into `LIMIT '60'` and MySQL rejects that).
+      Number.parseInt(req.query.limit, 10) || 60,
+    );
 
     res.json({ success: true, data: { activity: rows.map(mapActivity) } });
   }),

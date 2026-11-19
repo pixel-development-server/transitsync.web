@@ -34,7 +34,17 @@ export function extractToken(req) {
  * Both checks matter: the signature alone would keep working after an admin
  * revoked a session or bumped the user's `token_version`.
  */
-export function authenticate(req, res, next) {
+export async function authenticate(req, res, next) {
+  try {
+    return await runAuthentication(req, res, next);
+  } catch (error) {
+    // Express 4 does not catch rejected middleware promises; route failures
+    // (e.g. a dropped database connection) through the error pipeline.
+    return next(error);
+  }
+}
+
+async function runAuthentication(req, res, next) {
   const token = extractToken(req);
   if (!token) return next(unauthorized('Authentication required.', 'NO_TOKEN'));
 
@@ -51,23 +61,23 @@ export function authenticate(req, res, next) {
   const db = getDb();
 
   if (payload.jti) {
-    const session = db.prepare('SELECT * FROM login_sessions WHERE id = ?').get(payload.jti);
+    const session = await db.get('SELECT * FROM login_sessions WHERE id = ?', payload.jti);
     if (!session) return next(unauthorized('Session is no longer valid.', 'SESSION_REVOKED'));
     if (session.revoked_at) return next(unauthorized('Session has been signed out.', 'SESSION_REVOKED'));
     if (isExpired(session.expires_at)) {
       return next(unauthorized('Session has expired. Please sign in again.', 'SESSION_EXPIRED'));
     }
-    db.prepare("UPDATE login_sessions SET last_seen_at = datetime('now') WHERE id = ?").run(payload.jti);
+    await db.run("UPDATE login_sessions SET last_seen_at = NOW() WHERE id = ?", payload.jti);
   }
 
-  const user = loadUserForAuth(db, Number(payload.sub));
+  const user = await loadUserForAuth(db, Number(payload.sub));
   if (!user) return next(unauthorized('Account no longer exists.', 'USER_MISSING'));
   if (user.status !== 'active') return next(forbidden('This account has been suspended.'));
   if (Number(user.token_version) !== Number(payload.tv ?? 0)) {
     return next(unauthorized('Credentials have been revoked. Please sign in again.', 'TOKEN_REVOKED'));
   }
 
-  if (isLockedOut(user)) {
+  if (await isLockedOut(user)) {
     return next(serviceLocked());
   }
 
@@ -77,7 +87,9 @@ export function authenticate(req, res, next) {
   // Administrator, who must stay in to manage the window and switch it off.
   // Other institutions are completely unaffected: the check only ever looks at
   // the requester's own tenant_id.
-  const campusMaintenance = user.tenant_id ? getInstitutionMaintenance(db, user.tenant_id) : null;
+  const campusMaintenance = user.tenant_id
+    ? await getInstitutionMaintenance(db, user.tenant_id)
+    : null;
   if (campusMaintenance?.isMaintenanceMode && !isExemptFromInstitutionMaintenance(user, campusMaintenance)) {
     return next(maintenanceMode(institutionMaintenanceRejection(campusMaintenance)));
   }
@@ -155,10 +167,10 @@ export function requireStudent(req, res, next) {
  * The Global Emergency Lockout switch (settings key `system.lockdown`).
  * While engaged, every non-System-Administrator session is frozen.
  */
-export function isLockedOut(user) {
+export async function isLockedOut(user) {
   if (!user || user.role_key === 'system_admin') return false;
   try {
-    const row = getDb().prepare("SELECT value FROM settings WHERE key = 'system.lockdown'").get();
+    const row = await getDb().get("SELECT value FROM settings WHERE `key` = 'system.lockdown'");
     if (!row?.value) return false;
     const state = JSON.parse(row.value);
     return Boolean(state?.locked);

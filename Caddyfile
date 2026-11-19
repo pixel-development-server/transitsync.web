@@ -1,0 +1,73 @@
+# ---------------------------------------------------------------------------
+# TransitSync — Caddy v2 for a *Cloudflare Tunnel* front end (local homelab)
+#
+#   Topology:
+#     Browser --HTTPS--> Cloudflare edge --(TLS terminated)--> cloudflared
+#              --(plain HTTP on loopback)--> Caddy :8080 --> API :3100
+#
+#   Cloudflare terminates TLS at its edge, so this Caddy is a plain-HTTP origin:
+#   it needs NO certificates, NO ACME, and NO inbound :80/:443. That is why it
+#   listens on a loopback port (8080) instead of a public hostname on :443.
+#   (Port 80 on this host is already held by IIS / http.sys, so this also
+#   avoids a listener conflict entirely.)
+#
+#   Validate: caddy validate --config Caddyfile
+#   Run     : caddy run --config Caddyfile      (foreground, good for testing)
+#   Service : caddy start --config Caddyfile    (background)
+#   Reload  : caddy reload --config Caddyfile   (after a rebuild / config edit)
+#
+#   Prefer a public :443 + automatic HTTPS instead (direct A record + port
+#   forward, no tunnel)? Use Caddyfile.direct.
+# ---------------------------------------------------------------------------
+
+:8080 {
+	# Only accept traffic from the local tunnel connector. The public edge is the
+	# only thing that can reach this port; nothing on the LAN can.
+	bind 127.0.0.1
+
+	# --- API + Server-Sent Events -------------------------------------------
+	# One `handle` owns everything under /api. SSE lives at /api/stream and
+	# streams straight through the proxy (no buffering, never gzipped here).
+	handle /api/* {
+		reverse_proxy 127.0.0.1:3100 {
+			# The tunnel hop is plain HTTP, but the browser's real connection is
+			# HTTPS at Cloudflare's edge. Force the scheme so Express sees
+			# req.secure === true and stamps the session cookie `Secure`
+			# (see server/src/routes/auth.routes.js: `secure: req.secure`).
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	# --- Reserved WebSocket namespace ---------------------------------------
+	handle /socket.io/* {
+		reverse_proxy 127.0.0.1:3100 {
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	# --- Hashed/static build assets -----------------------------------------
+	# These MUST NOT fall through to the SPA shell. A browser holding an older
+	# index.html can request an old hashed filename; if the catch-all below
+	# served it index.html with a 200 the browser would try to execute HTML as
+	# JavaScript and the app would render a blank page. Serve these directly so
+	# a genuinely missing file returns a real 404.
+	@static path *.js *.css *.png *.svg *.ico *.jpg *.jpeg *.webp *.woff *.woff2 *.json
+	handle @static {
+		root * C:/SYP/client/dist
+		encode gzip
+		file_server
+	}
+
+	# --- Built SPA + client-side routing fallback ---------------------------
+	# `handle` blocks are mutually exclusive and evaluated in order, so the
+	# catch-all below only sees non-API traffic. Keep `try_files` *inside* this
+	# block: at the site root it would rewrite /api/* to /index.html before the
+	# proxy runs. gzip is scoped here too so it never buffers the SSE stream.
+	handle {
+		root * C:/SYP/client/dist
+		header Cache-Control "no-store"
+		encode gzip
+		try_files {path} {path}/ /index.html
+		file_server
+	}
+}

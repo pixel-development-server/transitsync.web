@@ -24,6 +24,8 @@ import {
   idSchema,
 } from '../validation/schemas.js';
 import { publicUser } from './auth.routes.js';
+import { userDirectoryScope, assertDirectoryRowVisible } from '../lib/tenantScope.js';
+import { writeCredentialRecord, userRecord } from '../../credentialStorage.js';
 
 const router = express.Router();
 
@@ -91,8 +93,8 @@ function assertPrincipalCanSee(actor, target) {
 }
 
 /** Level 200 roles only exist for a Level 200 principal. */
-function visibleRoles(db, actorLevel) {
-  const roles = permissionMatrix(db);
+async function visibleRoles(db, actorLevel) {
+  const roles = await permissionMatrix(db);
   if (Number(actorLevel) >= SUPER_ADMIN_LEVEL) return roles;
   return roles.filter((role) => Number(role.level) < SUPER_ADMIN_LEVEL);
 }
@@ -114,20 +116,26 @@ router.get(
     // The /users console is the Staff Accounts & RBAC surface. Student auth
     // accounts (role `student`) are managed through the Students registry
     // instead, so they are never listed here.
-    clauses.push("(r.key IS NULL OR r.key <> 'student')");
+    clauses.push("(r.`key` IS NULL OR r.`key` <> 'student')");
     if (search) {
       clauses.push('(u.full_name LIKE ? OR u.email LIKE ? OR u.job_title LIKE ?)');
       const term = `%${search}%`;
       params.push(term, term, term);
     }
     if (role && role !== 'all') {
-      clauses.push('r.key = ?');
+      clauses.push('r.`key` = ?');
       params.push(role);
     }
     if (status && status !== 'all') {
       clauses.push('u.status = ?');
       params.push(status);
     }
+    // Campus isolation: a campus principal is pinned to their own tenant and
+    // cannot read another college's staff. The platform owner governs the whole
+    // account directory and may optionally narrow it to one campus.
+    const scope = await userDirectoryScope(db, req.user, req.query, 'u');
+    clauses.push(scope.clause);
+    params.push(...scope.params);
     // Total-stealth: anyone below Level 200 never even sees that Level 200
     // accounts exist. Applied to both the page query and the total count so the
     // numbers agree.
@@ -145,44 +153,41 @@ router.get(
     };
     const orderBy = orderMap[req.query.sort] ?? 'u.id';
 
-    const rows = db
-      .prepare(
-        `SELECT u.id, u.email, u.full_name, u.phone, u.department, u.job_title, u.status,
-                u.is_first_login, u.password_changed, u.force_password_reset,
-                u.permissions_mode, u.last_login_at, u.created_at, u.tenant_id,
-                r.key AS role_key, r.name AS role_name, r.level AS role_level,
-                inst.name AS institution_name,
-                (SELECT COUNT(*) FROM login_sessions ls
-                  WHERE ls.user_id = u.id AND ls.revoked_at IS NULL
-                    AND ls.expires_at > datetime('now')) AS active_sessions
-           FROM users u
-           LEFT JOIN roles r ON r.id = u.role_id
-           LEFT JOIN institutions inst ON inst.id = u.tenant_id
-           ${where}
-          ORDER BY ${orderBy} ASC, u.id ASC
-          LIMIT ? OFFSET ?`,
-      )
-      .all(...params, limit, offset);
+    const rows = await db.all(
+      `SELECT u.id, u.email, u.full_name, u.phone, u.department, u.job_title, u.status,
+              u.is_first_login, u.password_changed, u.force_password_reset,
+              u.permissions_mode, u.last_login_at, u.created_at, u.tenant_id,
+              r.\`key\` AS role_key, r.name AS role_name, r.level AS role_level,
+              inst.name AS institution_name,
+              (SELECT COUNT(*) FROM login_sessions ls
+                WHERE ls.user_id = u.id AND ls.revoked_at IS NULL
+                  AND ls.expires_at > NOW()) AS active_sessions
+         FROM users u
+         LEFT JOIN roles r ON r.id = u.role_id
+         LEFT JOIN institutions inst ON inst.id = u.tenant_id
+         ${where}
+        ORDER BY ${orderBy} ASC, u.id ASC
+        LIMIT ? OFFSET ?`,
+      ...params, limit, offset,
+    );
 
-    const total = db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM users u
-           LEFT JOIN roles r ON r.id = u.role_id
-           LEFT JOIN institutions inst ON inst.id = u.tenant_id
-           ${where}`,
-      )
-      .get(...params).n;
+    const total = (await db.get(
+      `SELECT COUNT(*) AS n FROM users u
+         LEFT JOIN roles r ON r.id = u.role_id
+         LEFT JOIN institutions inst ON inst.id = u.tenant_id
+         ${where}`,
+      ...params,
+    )).n;
 
     const overridesByUser = new Map();
     if (rows.length) {
       const ids = rows.map((row) => row.id);
-      for (const row of db
-        .prepare(
-          `SELECT up.user_id, p.key, up.effect FROM user_permissions up
-             JOIN permissions p ON p.id = up.permission_id
-            WHERE up.user_id IN (${ids.map(() => '?').join(',')})`,
-        )
-        .all(...ids)) {
+      for (const row of await db.all(
+        `SELECT up.user_id, p.\`key\`, up.effect FROM user_permissions up
+           JOIN permissions p ON p.id = up.permission_id
+          WHERE up.user_id IN (${ids.map(() => '?').join(',')})`,
+        ...ids,
+      )) {
         if (!overridesByUser.has(row.user_id)) overridesByUser.set(row.user_id, []);
         overridesByUser.get(row.user_id).push({ key: row.key, effect: row.effect });
       }
@@ -191,11 +196,11 @@ router.get(
     res.json({
       success: true,
       data: {
-        users: rows.map((row) => ({
-          ...publicUser({ ...row, permissions: [...resolvePermissions(db, row)] }),
+        users: await Promise.all(rows.map(async (row) => ({
+          ...publicUser({ ...row, permissions: [...await resolvePermissions(db, row)] }),
           activeSessions: row.active_sessions,
           overrides: overridesByUser.get(row.id) ?? [],
-        })),
+        }))),
         meta: paginationMeta({ total, limit, page }),
       },
     });
@@ -215,7 +220,7 @@ router.get(
       data: {
         modules: MODULES,
         permissions: ALL_PERMISSIONS,
-        roles: visibleRoles(db, req.user.role_level),
+        roles: await visibleRoles(db, req.user.role_level),
       },
     });
   }),
@@ -227,7 +232,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const { limit = 50, offset = 0 } = parsePagination(req.query, { defaultLimit: 50, maxLimit: 500 });
-    const { rows, total } = listAudit(db, {
+    const { rows, total } = await listAudit(db, {
       limit,
       offset,
       userId: req.query.userId ? Number(req.query.userId) : null,
@@ -252,26 +257,25 @@ router.get(
   validate(idSchema, 'params'),
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const user = loadUserForAuth(db, Number(req.params.id));
+    const user = await loadUserForAuth(db, Number(req.params.id));
     if (!user) throw notFound('Staff member');
     assertPrincipalCanSee(req.user, user);
+    assertDirectoryRowVisible(req.user, user);
 
-    const overrides = db
-      .prepare(
-        `SELECT p.key, up.effect, up.granted_at, g.full_name AS granted_by_name
-           FROM user_permissions up
-           JOIN permissions p ON p.id = up.permission_id
-           LEFT JOIN users g   ON g.id = up.granted_by
-          WHERE up.user_id = ?`,
-      )
-      .all(user.id);
+    const overrides = await db.all(
+      `SELECT p.\`key\`, up.effect, up.granted_at, g.full_name AS granted_by_name
+         FROM user_permissions up
+         JOIN permissions p ON p.id = up.permission_id
+         LEFT JOIN users g   ON g.id = up.granted_by
+        WHERE up.user_id = ?`,
+      user.id,
+    );
 
-    const sessions = db
-      .prepare(
-        `SELECT id, device, ip, created_at, last_seen_at, expires_at, revoked_at
-           FROM login_sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 20`,
-      )
-      .all(user.id);
+    const sessions = await db.all(
+      `SELECT id, device, ip, created_at, last_seen_at, expires_at, revoked_at
+         FROM login_sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 20`,
+      user.id,
+    );
 
     res.json({
       success: true,
@@ -299,11 +303,11 @@ router.post(
       temporaryPassword, permissionsMode, permissions, forcePasswordChange, tenantId,
     } = req.body;
 
-    if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) {
+    if (await db.get('SELECT id FROM users WHERE email = ?', email)) {
       throw conflict('A staff account with that email already exists.');
     }
 
-    const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(roleId);
+    const role = await db.get('SELECT * FROM roles WHERE id = ?', roleId);
     if (!role) throw unprocessable('Unknown role.', [{ field: 'roleId', message: 'Pick a valid role.' }]);
 
     // No user may mint a role at or above their own seniority — this keeps the
@@ -358,7 +362,7 @@ router.post(
           { field: 'tenantId', message: 'Campus staff accounts must be bound to a college.' },
         ]);
       }
-      if (!db.prepare('SELECT id FROM institutions WHERE id = ?').get(tenantId)) {
+      if (!(await db.get('SELECT id FROM institutions WHERE id = ?', tenantId))) {
         throw unprocessable('Unknown college tenant.', [
           { field: 'tenantId', message: 'Pick a valid campus tenant.' },
         ]);
@@ -368,29 +372,26 @@ router.post(
       tenant = req.user.tenant_id ?? null;
     }
 
-    const userId = db.transaction(() => {
-      const result = db
-        .prepare(
+    const userId = await db.transaction(async () => {
+      const result = await db.run(
 `INSERT INTO users
            (email, full_name, password_hash, phone, job_title, department, role_id,
             status, is_first_login, password_changed, force_password_reset, permissions_mode, tenant_id, created_by)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-        .run(
-          email, fullName, passwordHash, phone ?? null, jobTitle ?? null, department ?? null,
-          roleId,
-          accountStatus,
-          isFirstLogin,
-          passwordChanged,
-          forceReset,
-          permissionsMode,
-          tenant,
-          req.user.id,
-        );
+        email, fullName, passwordHash, phone ?? null, jobTitle ?? null, department ?? null,
+        roleId,
+        accountStatus,
+        isFirstLogin,
+        passwordChanged,
+        forceReset,
+        permissionsMode,
+        tenant,
+        req.user.id,
+      );
 
       const id = Number(result.lastInsertRowid);
       if (permissionsMode === 'CUSTOM') {
-        setUserPermissions(db, id, permissions, { mode: 'CUSTOM', grantedBy: req.user.id });
+        await setUserPermissions(db, id, permissions, { mode: 'CUSTOM', grantedBy: req.user.id });
       }
       return id;
     });
@@ -403,7 +404,11 @@ router.post(
       }),
     );
 
-    const created = loadUserForAuth(db, userId);
+    const created = await loadUserForAuth(db, userId);
+    // Mirror the new account into the plain-text audit export. Identity and
+    // provisioning only — the export never sees a password or a hash.
+    writeCredentialRecord(userRecord(created, { source: 'user.create' }));
+
     res.status(201).json({
       success: true,
       data: {
@@ -430,9 +435,10 @@ router.patch(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const target = loadUserForAuth(db, id);
+    const target = await loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
     assertPrincipalCanSee(req.user, target);
+    assertDirectoryRowVisible(req.user, target);
 
     const { fullName, roleId, status, jobTitle, department, phone } = req.body;
     const isSelf = id === Number(req.user.id);
@@ -449,18 +455,17 @@ router.patch(
     }
 
     if (roleId) {
-      const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(roleId);
+      const role = await db.get('SELECT * FROM roles WHERE id = ?', roleId);
       if (!role) throw unprocessable('Unknown role.', [{ field: 'roleId', message: 'Pick a valid role.' }]);
 
       grantingSuperAdmin = role.key === ROLE_KEYS.SUPER_ADMIN;
 
       if (target.role_key === ROLE_KEYS.SYSTEM_ADMIN && role.key !== ROLE_KEYS.SYSTEM_ADMIN) {
-        const remaining = db
-          .prepare(
-            `SELECT COUNT(*) AS n FROM users u JOIN roles r ON r.id = u.role_id
-              WHERE r.key = ? AND u.status = 'active' AND u.id <> ?`,
-          )
-          .get(ROLE_KEYS.SYSTEM_ADMIN, id).n;
+        const remaining = (await db.get(
+          `SELECT COUNT(*) AS n FROM users u JOIN roles r ON r.id = u.role_id
+            WHERE r.\`key\` = ? AND u.status = 'active' AND u.id <> ?`,
+          ROLE_KEYS.SYSTEM_ADMIN, id,
+        )).n;
         if (remaining === 0) {
           throw badRequest('At least one active System Administrator must remain.');
         }
@@ -473,8 +478,8 @@ router.patch(
       }
     }
 
-    db.transaction(() => {
-      db.prepare(
+    await db.transaction(async () => {
+      await db.run(
         `UPDATE users SET
            full_name  = COALESCE(?, full_name),
            role_id    = COALESCE(?, role_id),
@@ -482,28 +487,29 @@ router.patch(
            job_title  = COALESCE(?, job_title),
            department = COALESCE(?, department),
            phone      = COALESCE(?, phone),
-           updated_at = datetime('now')
+           updated_at = NOW()
          WHERE id = ?`,
-      ).run(fullName ?? null, roleId ?? null, status ?? null, jobTitle ?? null, department ?? null, phone ?? null, id);
+        fullName ?? null, roleId ?? null, status ?? null, jobTitle ?? null, department ?? null, phone ?? null, id,
+      );
 
       // Suspending or re-rolling a role must not leave live sessions behind.
       if (status && status !== 'active') {
-        db.prepare("UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = 'account_suspended' WHERE user_id = ? AND revoked_at IS NULL").run(id);
+        await db.run("UPDATE login_sessions SET revoked_at = NOW(), revoked_reason = 'account_suspended' WHERE user_id = ? AND revoked_at IS NULL", id);
       }
       if (roleId && roleId !== target.role_id) {
-        db.prepare('UPDATE users SET token_version = token_version + 1 WHERE id = ?').run(id);
-        db.prepare("UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = 'role_changed' WHERE user_id = ? AND revoked_at IS NULL").run(id);
+        await db.run('UPDATE users SET token_version = token_version + 1 WHERE id = ?', id);
+        await db.run("UPDATE login_sessions SET revoked_at = NOW(), revoked_reason = 'role_changed' WHERE user_id = ? AND revoked_at IS NULL", id);
       }
       // A Super Administrator is a platform-scope account: promoting one always
       // detaches it from any campus tenant it used to belong to.
       if (grantingSuperAdmin && roleId !== target.role_id) {
-        db.prepare('UPDATE users SET tenant_id = NULL WHERE id = ?').run(id);
+        await db.run('UPDATE users SET tenant_id = NULL WHERE id = ?', id);
       }
     });
 
     recordAudit(fromRequest(req, 'user.update', { entity: 'user', entityId: id, detail: { ...req.body } }));
 
-    const updated = loadUserForAuth(db, id);
+    const updated = await loadUserForAuth(db, id);
     res.json({ success: true, data: { user: publicUser(updated) } });
   }),
 );
@@ -519,9 +525,10 @@ router.put(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const target = loadUserForAuth(db, id);
+    const target = await loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
     assertPrincipalCanSee(req.user, target);
+    assertDirectoryRowVisible(req.user, target);
     assertRankAbove(req.user, target, 'change permissions for');
 
     const { permissionsMode, permissions } = req.body;
@@ -541,9 +548,9 @@ router.put(
       }
     }
 
-    setUserPermissions(db, id, permissions, { mode: permissionsMode, grantedBy: req.user.id });
-    db.prepare('UPDATE users SET token_version = token_version + 1, updated_at = datetime(\'now\') WHERE id = ?').run(id);
-    db.prepare("UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = 'permissions_changed' WHERE user_id = ? AND revoked_at IS NULL").run(id);
+    await setUserPermissions(db, id, permissions, { mode: permissionsMode, grantedBy: req.user.id });
+    await db.run("UPDATE users SET token_version = token_version + 1, updated_at = NOW() WHERE id = ?", id);
+    await db.run("UPDATE login_sessions SET revoked_at = NOW(), revoked_reason = 'permissions_changed' WHERE user_id = ? AND revoked_at IS NULL", id);
 
     recordAudit(
       fromRequest(req, 'user.permissions_update', {
@@ -553,7 +560,7 @@ router.put(
       }),
     );
 
-    const updated = loadUserForAuth(db, id);
+    const updated = await loadUserForAuth(db, id);
     res.json({
       success: true,
       data: {
@@ -573,25 +580,64 @@ router.delete(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const target = loadUserForAuth(db, id);
+    const target = await loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
     assertPrincipalCanSee(req.user, target);
+    assertDirectoryRowVisible(req.user, target);
     assertRankAbove(req.user, target, 'reset permissions for');
 
-    db.transaction(() => {
-      db.prepare('DELETE FROM user_permissions WHERE user_id = ?').run(id);
-      db.prepare("UPDATE users SET permissions_mode = 'INHERIT', updated_at = datetime('now') WHERE id = ?").run(id);
-      db.prepare('UPDATE users SET token_version = token_version + 1 WHERE id = ?').run(id);
+    await db.transaction(async () => {
+      await db.run('DELETE FROM user_permissions WHERE user_id = ?', id);
+      await db.run("UPDATE users SET permissions_mode = 'INHERIT', updated_at = NOW() WHERE id = ?", id);
+      await db.run('UPDATE users SET token_version = token_version + 1 WHERE id = ?', id);
     });
 
-    db.prepare("UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = 'permissions_changed' WHERE user_id = ? AND revoked_at IS NULL").run(id);
+    await db.run("UPDATE login_sessions SET revoked_at = NOW(), revoked_reason = 'permissions_changed' WHERE user_id = ? AND revoked_at IS NULL", id);
     recordAudit(fromRequest(req, 'user.permissions_reset', { entity: 'user', entityId: id }));
 
-    res.json({ success: true, data: { user: publicUser(loadUserForAuth(db, id)) } });
+    res.json({ success: true, data: { user: publicUser(await loadUserForAuth(db, id)) } });
   }),
 );
 
-/** Force the account to rotate its password on next sign-in. */
+/**
+ * Put an account into the forced-rotation state with a fresh, single-use
+ * temporary password: replace the hash, revoke every live session, and arm the
+ * gate so the next successful sign-in halts on the "create a new password"
+ * screen. Returns the plaintext handover credential.
+ *
+ * A forced reset REQUIRES a working credential to reach the gate, because the
+ * gate sits *after* the password is proven. So both admin reset actions mint a
+ * temporary password: without one, a user who has forgotten their password
+ * would be locked out entirely rather than prompted to choose a new one.
+ */
+async function issueTemporaryRotation(db, id, { reason }) {
+  const plain = generateTemporaryPassword();
+  const passwordHash = await hashPassword(plain);
+
+  await db.transaction(async () => {
+    await db.run(
+      `UPDATE users SET password_hash = ?, password_changed = 0, is_first_login = 1,
+                        force_password_reset = 1, token_version = token_version + 1,
+                        updated_at = NOW() WHERE id = ?`,
+      passwordHash, id,
+    );
+    await db.run(
+      "UPDATE login_sessions SET revoked_at = NOW(), revoked_reason = ? WHERE user_id = ? AND revoked_at IS NULL",
+      reason, id,
+    );
+  });
+
+  return plain;
+}
+
+/**
+ * Force the account to rotate its password on next sign-in.
+ *
+ * Mints a temporary password the administrator hands over out of band. The
+ * holder signs in with that credential and is stopped at the rotation gate
+ * until they choose a password of their own — no prior password is required,
+ * which is the whole point of an administrator-triggered reset.
+ */
 router.post(
   '/:id/force-password-reset',
   requirePermission('users:edit'),
@@ -599,17 +645,25 @@ router.post(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const target = loadUserForAuth(db, id);
+    const target = await loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
     assertPrincipalCanSee(req.user, target);
+    assertDirectoryRowVisible(req.user, target);
     assertRankAbove(req.user, target, 'force a password reset for');
     if (id === Number(req.user.id)) throw badRequest('You cannot force a password reset on your own account.');
 
-    db.prepare("UPDATE users SET force_password_reset = 1, password_changed = 0, updated_at = datetime('now') WHERE id = ?").run(id);
-    db.prepare("UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = 'forced_password_reset' WHERE user_id = ? AND revoked_at IS NULL").run(id);
+    const temporaryPassword = await issueTemporaryRotation(db, id, { reason: 'forced_password_reset' });
 
     recordAudit(fromRequest(req, 'user.force_password_reset', { entity: 'user', entityId: id }));
-    res.json({ success: true, data: { user: publicUser(loadUserForAuth(db, id)) } });
+    writeCredentialRecord(userRecord(await loadUserForAuth(db, id), { source: 'user.force_password_reset' }));
+    res.json({
+      success: true,
+      data: {
+        user: publicUser(await loadUserForAuth(db, id)),
+        temporaryPassword,
+        notice: 'Share this temporary password securely. It must be changed at first sign-in.',
+      },
+    });
   }),
 );
 
@@ -621,27 +675,19 @@ router.post(
   asyncHandler(async (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const target = loadUserForAuth(db, id);
+    const target = await loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
     assertPrincipalCanSee(req.user, target);
+    assertDirectoryRowVisible(req.user, target);
     assertRankAbove(req.user, target, 'reset the password for');
 
-    const plain = generateTemporaryPassword();
-    const passwordHash = await hashPassword(plain);
-
-    db.transaction(() => {
-      db.prepare(
-        `UPDATE users SET password_hash = ?, password_changed = 0, is_first_login = 1,
-                          force_password_reset = 1, token_version = token_version + 1,
-                          updated_at = datetime('now') WHERE id = ?`,
-      ).run(passwordHash, id);
-      db.prepare("UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = 'admin_password_reset' WHERE user_id = ? AND revoked_at IS NULL").run(id);
-    });
+    const temporaryPassword = await issueTemporaryRotation(db, id, { reason: 'admin_password_reset' });
 
     recordAudit(fromRequest(req, 'user.reset_password', { entity: 'user', entityId: id }));
+    writeCredentialRecord(userRecord(await loadUserForAuth(db, id), { source: 'user.reset_password' }));
     res.status(201).json({
       success: true,
-      data: { temporaryPassword: plain, notice: 'Share securely. It must be changed at first sign-in.' },
+      data: { temporaryPassword, notice: 'Share securely. It must be changed at first sign-in.' },
     });
   }),
 );
@@ -658,29 +704,30 @@ router.delete(
     const id = Number(req.params.id);
     if (id === Number(req.user.id)) throw badRequest('You cannot delete your own account.');
 
-    const target = loadUserForAuth(db, id);
+    const target = await loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
     assertPrincipalCanSee(req.user, target);
+    assertDirectoryRowVisible(req.user, target);
 
     if (target.role_key === ROLE_KEYS.SYSTEM_ADMIN) {
-      const remaining = db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM users u JOIN roles r ON r.id = u.role_id
-            WHERE r.key = ? AND u.status = 'active' AND u.id <> ?`,
-        )
-        .get(ROLE_KEYS.SYSTEM_ADMIN, id).n;
+      const remaining = (await db.get(
+        `SELECT COUNT(*) AS n FROM users u JOIN roles r ON r.id = u.role_id
+          WHERE r.\`key\` = ? AND u.status = 'active' AND u.id <> ?`,
+        ROLE_KEYS.SYSTEM_ADMIN, id,
+      )).n;
       if (remaining === 0) throw badRequest('At least one active System Administrator must remain.');
     }
 
     assertRankAbove(req.user, target, 'delete');
 
     // Soft-delete keeps audit history and FK integrity intact.
-    db.prepare(
-      `UPDATE users SET status = 'suspended', email = email || '.deleted.' || id,
-                        token_version = token_version + 1, updated_at = datetime('now')
+    await db.run(
+      `UPDATE users SET status = 'suspended', email = CONCAT(email, '.deleted.', id),
+                        token_version = token_version + 1, updated_at = NOW()
         WHERE id = ?`,
-    ).run(id);
-    db.prepare("UPDATE login_sessions SET revoked_at = datetime('now'), revoked_reason = 'account_deleted' WHERE user_id = ? AND revoked_at IS NULL").run(id);
+      id,
+    );
+    await db.run("UPDATE login_sessions SET revoked_at = NOW(), revoked_reason = 'account_deleted' WHERE user_id = ? AND revoked_at IS NULL", id);
 
     recordAudit(fromRequest(req, 'user.delete', { entity: 'user', entityId: id, detail: { email: target.email } }));
     res.json({ success: true, data: { message: `${target.full_name} has been removed.` } });
@@ -709,23 +756,23 @@ router.delete(
     const id = Number(req.params.id);
     if (id === Number(req.user.id)) throw badRequest('You cannot delete your own account.');
 
-    const target = loadUserForAuth(db, id);
+    const target = await loadUserForAuth(db, id);
     if (!target) throw notFound('Staff member');
     assertPrincipalCanSee(req.user, target);
+    assertDirectoryRowVisible(req.user, target);
 
     if (target.role_key === ROLE_KEYS.SYSTEM_ADMIN) {
-      const remaining = db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM users u JOIN roles r ON r.id = u.role_id
-            WHERE r.key = ? AND u.status = 'active' AND u.id <> ?`,
-        )
-        .get(ROLE_KEYS.SYSTEM_ADMIN, id).n;
+      const remaining = (await db.get(
+        `SELECT COUNT(*) AS n FROM users u JOIN roles r ON r.id = u.role_id
+          WHERE r.\`key\` = ? AND u.status = 'active' AND u.id <> ?`,
+        ROLE_KEYS.SYSTEM_ADMIN, id,
+      )).n;
       if (remaining === 0) throw badRequest('At least one active System Administrator must remain.');
     }
 
     assertRankAbove(req.user, target, 'delete');
 
-    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    await db.run('DELETE FROM users WHERE id = ?', id);
     recordAudit(fromRequest(req, 'user.purge', { entity: 'user', entityId: id, detail: { email: target.email } }));
     res.json({ success: true, data: { message: `${target.full_name} has been permanently deleted.` } });
   }),
@@ -745,12 +792,12 @@ rolesRouter.get(
   requirePermission('roles:read'),
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const roles = visibleRoles(db, req.user.role_level).map((role) => {
-      const headcount = db
-        .prepare('SELECT COUNT(*) AS n FROM users WHERE role_id = ? AND status = ?')
-        .get(role.id, 'active').n;
-      return { ...role, headcount, editable: Number(req.user.role_level) > Number(role.level) };
-    });
+    const roles = await Promise.all(
+      (await visibleRoles(db, req.user.role_level)).map(async (role) => {
+        const headcount = (await db.get('SELECT COUNT(*) AS n FROM users WHERE role_id = ? AND status = ?', role.id, 'active')).n;
+        return { ...role, headcount, editable: Number(req.user.role_level) > Number(role.level) };
+      }),
+    );
     res.json({ success: true, data: { roles, modules: MODULES, permissions: ALL_PERMISSIONS } });
   }),
 );
@@ -760,7 +807,7 @@ rolesRouter.put(
   requirePermission('roles:edit'),
   asyncHandler(async (req, res) => {
     const db = getDb();
-    const role = db.prepare('SELECT * FROM roles WHERE key = ?').get(req.params.key);
+    const role = await db.get('SELECT * FROM roles WHERE `key` = ?', req.params.key);
     if (!role) throw notFound('Role');
     assertKnownPermissions(req.body?.permissions);
 
@@ -775,11 +822,12 @@ rolesRouter.put(
       throw forbidden('You can only edit roles below your own seniority level.', { code: 'LEVEL_LOCKED' });
     }
 
-    setRolePermissions(db, role.id, req.body.permissions);
-    db.prepare(
+    await setRolePermissions(db, role.id, req.body.permissions);
+    await db.run(
       `UPDATE users SET token_version = token_version + 1
         WHERE role_id = ? AND permissions_mode = 'INHERIT'`,
-    ).run(role.id);
+      role.id,
+    );
 
     recordAudit(
       fromRequest(req, 'role.permissions_update', {
@@ -789,6 +837,6 @@ rolesRouter.put(
       }),
     );
 
-    res.json({ success: true, data: { role: permissionMatrix(db).find((entry) => entry.key === role.key) } });
+    res.json({ success: true, data: { role: (await permissionMatrix(db)).find((entry) => entry.key === role.key) } });
   }),
 );

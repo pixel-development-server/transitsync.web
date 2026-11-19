@@ -163,9 +163,7 @@ test('GET /users lists staff only and hides student auth accounts', async () => 
   assert.ok(!emails.includes(email), 'student auth account leaked into the staff console');
 
   // The link still exists in the Students registry.
-  const linked = db
-    .prepare('SELECT user_id, is_claimed FROM students WHERE college_id = ?')
-    .get(collegeId);
+  const linked = await db.get('SELECT user_id, is_claimed FROM students WHERE college_id = ?', collegeId);
   assert.ok(linked.user_id, 'roster row was not linked to the student account');
   assert.equal(Number(linked.is_claimed), 1);
 });
@@ -184,17 +182,17 @@ test('adding a student with an email provisions an invited, claimable account', 
   });
   assert.equal(created.status, 201);
 
-  const users = db
-    .prepare('SELECT email, status, password_hash FROM users WHERE LOWER(email) = LOWER(?)')
-    .all(email);
+  const users = await db.all('SELECT email, status, password_hash FROM users WHERE LOWER(email) = LOWER(?)', email);
   assert.equal(users.length, 1, 'expected exactly one paired account');
   assert.equal(users[0].status, 'invited');
 
-  const linked = db
-    .prepare('SELECT user_id, is_claimed FROM students WHERE college_id = ?')
-    .get(collegeId);
+  const linked = await db.get('SELECT user_id, is_claimed FROM students WHERE college_id = ?', collegeId);
   assert.ok(linked.user_id, 'roster row must be linked to the provisioned account');
-  assert.equal(Number(linked.is_claimed), 1);
+  // Provisioning links the account but does NOT claim it: the rider still holds
+  // the password sentinel, so `student-check-email` reports FIRST_TIME_USER
+  // (asserted below). `is_claimed` flips to 1 only when the rider sets a
+  // password through `student-register`.
+  assert.equal(Number(linked.is_claimed), 0);
 
   // Still appears as a first-time user: the sentinel means "no password yet".
   const probe = await call(ctx, 'POST', '/api/auth/student-check-email', { body: { email } });
@@ -217,9 +215,10 @@ test('a staff-provisioned account is activated when the rider claims it', async 
   assert.equal(registered.status, 201);
 
   // Same row updated in place — not a duplicate account.
-  const users = db
-    .prepare('SELECT id, status, password_hash, is_first_login, password_changed FROM users WHERE LOWER(email) = LOWER(?)')
-    .all(email);
+  const users = await db.all(
+    'SELECT id, status, password_hash, is_first_login, password_changed FROM users WHERE LOWER(email) = LOWER(?)',
+    email,
+  );
   assert.equal(users.length, 1);
   assert.equal(users[0].status, 'active');
   assert.ok(users[0].password_hash.startsWith('$2'), 'password was not set on the existing account');
@@ -229,7 +228,9 @@ test('a staff-provisioned account is activated when the rider claims it', async 
   const probe = await call(ctx, 'POST', '/api/auth/student-check-email', { body: { email } });
   assert.equal(probe.body.data.status, 'EXISTS_WITH_PASSWORD');
 
-  const login = await call(ctx, 'POST', '/api/auth/login', { body: { email, password: RIDER_PASSWORD } });
+  const login = await call(ctx, 'POST', '/api/auth/login', {
+    body: { email, password: RIDER_PASSWORD, portalType: 'student' },
+  });
   assert.equal(login.status, 200);
   assert.equal(login.body.data.user.role, 'student');
 });
@@ -246,7 +247,7 @@ test('adding a student whose account already exists links it without duplicating
     body: { email, password: RIDER_PASSWORD, confirmPassword: RIDER_PASSWORD },
   });
 
-  const before = db.prepare('SELECT COUNT(*) AS n FROM users WHERE LOWER(email) = LOWER(?)').get(email).n;
+  const before = (await db.get('SELECT COUNT(*) AS n FROM users WHERE LOWER(email) = LOWER(?)', email)).n;
   assert.equal(before, 1);
 
   const again = await call(ctx, 'POST', '/api/students', {
@@ -259,7 +260,7 @@ test('adding a student whose account already exists links it without duplicating
   });
   assert.equal(again.status, 201);
 
-  const after = db.prepare('SELECT COUNT(*) AS n FROM users WHERE LOWER(email) = LOWER(?)').get(email).n;
+  const after = (await db.get('SELECT COUNT(*) AS n FROM users WHERE LOWER(email) = LOWER(?)', email)).n;
   assert.equal(after, 1, 'linking an existing account must not create a duplicate user');
 });
 
@@ -279,7 +280,7 @@ test('a signed-in student can read the live route schedule board', async () => {
     body: { email, password: RIDER_PASSWORD, confirmPassword: RIDER_PASSWORD },
   });
   const session = await call(ctx, 'POST', '/api/auth/login', {
-    body: { email, password: RIDER_PASSWORD },
+    body: { email, password: RIDER_PASSWORD, portalType: 'student' },
   });
   assert.equal(session.status, 200);
 

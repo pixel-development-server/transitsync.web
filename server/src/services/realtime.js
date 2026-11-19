@@ -21,22 +21,50 @@ export const CHANNEL_PERMISSIONS = {
   dashboard: ['dashboard:read'],
   visitor: ['attendance:read', 'dashboard:read'],
   users: ['users:read'],
+  // CRUD fan-out. Each carries the read permission of its own module so a
+  // principal who cannot list the entity never hears about its changes.
+  students: ['students:read', 'dashboard:read'],
+  buses: ['fleet:read'],
+  routes: ['fleet:read'],
+  // Trip selections are student records: read them with the roster, or with
+  // attendance when a campus only holds the scan/reporting set.
+  bookings: ['students:read', 'attendance:read', 'dashboard:read'],
 };
 
 const HEARTBEAT_MS = 25_000;
 
 class RealtimeHub {
   constructor() {
-    /** @type {Map<string, {id:string,res:import('express').Response,userId:number|null,email:string|null,permissions:Set<string>,channels:Set<string>,connectedAt:number}>} */
+    /** @type {Map<string, {id:string,res:import('express').Response,userId:number|null,email:string|null,roleKey:string|null,tenantId:string|null,permissions:Set<string>,channels:Set<string>,connectedAt:number}>} */
     this.clients = new Map();
     this.heartbeat = null;
     this.sequence = 0;
   }
 
-  canReceive(client, channel) {
+  /**
+   * Is this subscriber entitled to `channel`?
+   *
+   * A rider holds no staff permissions at all by design (see `ROLE_DEFAULTS`
+   * for `student`), so every fan-out channel denies them — they are addressed
+   * only through `sendToUser`, which carries their own rows and needs no
+   * channel entitlement. That keeps one student's booking out of another
+   * student's stream even though both share the connection.
+   *
+   * `eventTenant` additionally filters by campus: a campus subscriber only
+   * ever hears its own campus's events plus campus-neutral (system) ones, so
+   * one college's live board never displays another college's scans, alerts or
+   * roster changes. A platform subscriber (no tenant) hears everything — they
+   * govern the whole platform.
+   */
+  canReceive(client, channel, eventTenant = null) {
+    if (client.roleKey === 'student') return false;
     const required = CHANNEL_PERMISSIONS[channel];
-    if (!required) return client.permissions.has('dashboard:read');
-    return required.some((permission) => client.permissions.has(permission));
+    const entitled = required
+      ? required.some((permission) => client.permissions.has(permission))
+      : client.permissions.has('dashboard:read');
+    if (!entitled) return false;
+    if (client.tenantId != null && eventTenant != null && client.tenantId !== eventTenant) return false;
+    return true;
   }
 
   /**
@@ -61,6 +89,11 @@ class RealtimeHub {
       res,
       userId: user?.id ?? null,
       email: user?.email ?? null,
+      roleKey: user?.role_key ?? user?.roleKey ?? null,
+      // Campus tenancy of the subscriber: NULL means a platform principal
+      // (governs every campus); otherwise only this campus's events are fanned
+      // out. See `canReceive`.
+      tenantId: user?.tenant_id ?? null,
       permissions,
       channels: new Set(),
       connectedAt: Date.now(),
@@ -98,14 +131,20 @@ class RealtimeHub {
 
   /**
    * Push an event to every subscriber entitled to `channel`.
+   *
+   * The event's campus is the explicit `tenantId` argument when given,
+   * otherwise `payload.tenantId` / `payload.tenant_id` when the payload carries
+   * one, otherwise NULL (a campus-neutral event every campus receives).
    * @param {string} channel  one of CHANNEL_PERMISSIONS
    * @param {string} event    client-side event name, e.g. 'scan'
    * @param {object} payload  JSON-serialisable body
+   * @param {string|null} [tenantId] campus this event belongs to, when the payload does not carry one
    */
-  broadcast(channel, event, payload) {
+  broadcast(channel, event, payload, tenantId) {
+    const eventTenant = tenantId !== undefined ? (tenantId ?? null) : (payload?.tenantId ?? payload?.tenant_id ?? null);
     let delivered = 0;
     for (const client of this.clients.values()) {
-      if (!this.canReceive(client, channel)) continue;
+      if (!this.canReceive(client, channel, eventTenant)) continue;
       if (this.sendTo(client.id, event, { channel, ...payload })) delivered += 1;
     }
     return delivered;

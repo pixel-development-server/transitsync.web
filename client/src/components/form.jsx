@@ -13,7 +13,7 @@ import { Icon } from './Icon.jsx';
 
 export function Field({ label, hint, error, required, children, htmlFor, className = '', counter }) {
   return (
-    <div className={className}>
+    <div className={`min-w-0 ${className}`}>
       {label ? (
         <label className="label" htmlFor={htmlFor}>
           {label}
@@ -23,14 +23,14 @@ export function Field({ label, hint, error, required, children, htmlFor, classNa
 
       {children}
 
-      <div className="mt-1 flex min-h-[1rem] items-start justify-between gap-2">
+      <div className="mt-1 flex min-h-[1rem] min-w-0 items-start justify-between gap-2">
         {error ? (
-          <p className="flex items-center gap-1 text-[0.7rem] font-medium text-red-400">
-            <Icon name="info" className="h-3 w-3 shrink-0" />
+          <p className="flex min-w-0 items-start gap-1 text-[0.7rem] leading-snug font-medium text-red-400 break-words">
+            <Icon name="info" className="mt-px h-3 w-3 shrink-0" />
             {error}
           </p>
         ) : hint ? (
-          <p className="text-[0.7rem] text-mist-500">{hint}</p>
+          <p className="min-w-0 text-[0.7rem] leading-snug text-mist-500 break-words">{hint}</p>
         ) : null}
         {counter ? <p className="tabular shrink-0 text-[0.68rem] text-mist-500">{counter}</p> : null}
       </div>
@@ -194,7 +194,7 @@ export function Toggle({ checked, onChange, label, hint, disabled, id }) {
          */}
         <span
           aria-hidden="true"
-          className="absolute inset-0 rounded-full bg-ink-600 transition-colors duration-200 peer-checked:bg-sky-500 peer-focus-visible:ring-2 peer-focus-visible:ring-sky-400/60 peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-[var(--surface-sunken)]"
+          className="absolute inset-0 rounded-full bg-ink-600 transition-colors duration-100 peer-checked:bg-sky-500 peer-focus-visible:ring-2 peer-focus-visible:ring-sky-400/60 peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-[var(--surface-sunken)]"
         />
         {/*
          * Thumb. Anchored top-left and translated exactly its own width when
@@ -202,7 +202,7 @@ export function Toggle({ checked, onChange, label, hint, disabled, id }) {
          */}
         <span
           aria-hidden="true"
-          className="pointer-events-none absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform duration-200 peer-checked:translate-x-full"
+          className="pointer-events-none absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform duration-100 peer-checked:translate-x-full"
         />
       </span>
       <span className="min-w-0">
@@ -299,5 +299,5 @@ export function FilterBar({ children, className = '', onClear, clearLabel = 'Cle
 /** Grid used by every create/edit dialog so fields line up consistently. */
 export function FormGrid({ children, columns = 2, className = '' }) {
   const cols = { 1: 'sm:grid-cols-1', 2: 'sm:grid-cols-2', 3: 'sm:grid-cols-3' }[columns] ?? 'sm:grid-cols-2';
-  return <div className={`grid grid-cols-1 gap-x-4 ${cols} ${className}`}>{children}</div>;
+  return <div className={`grid grid-cols-1 gap-x-4 gap-y-3 ${cols} ${className}`}>{children}</div>;
 }

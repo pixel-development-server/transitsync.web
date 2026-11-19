@@ -10,6 +10,10 @@
     "react/rules-of-hooks": "error",
     "react/only-export-components": ["warn", { "allowConstantExport": true }]
   },
+  "globals": {
+    "__BRAND_ICON_URL__": "readonly",
+    "__GOOGLE_AUTH_ENABLED__": "readonly"
+  },
   "overrides": [
     {
       "files": ["vite.config.js"],

@@ -19,12 +19,13 @@ import { formatNumber } from '../lib/format.js';
 /**
  * TransitSync brand mark.
  *
- * `busicon.png` is a fully-opaque 320x320 raster (a dark glyph on a solid white
- * background) with no alpha channel, so it cannot be dropped transparently onto
- * the dark navigation the way the old `bus` line-icon was. It is therefore
- * framed as a white rounded "chip" with a hairline ring that keeps it legible on
- * both the light surface and the dark sidebar, and `object-contain` preserves
- * the artwork's proportions at any size.
+ * `busicon.png` is a 320x320 raster artwork sourced from `assets/busicon.png`
+ * and served from `public/`. Because `public/` files keep a stable URL, the
+ * build stamps it with a content hash (`__BRAND_ICON_URL__`) so a replaced icon
+ * is fetched afresh instead of served from a stale cache. It is framed as a
+ * white rounded "chip" with a hairline ring that keeps it legible on both the
+ * light surface and the dark sidebar, and `object-contain` preserves the
+ * artwork's proportions at any size.
  *
  * `size` drives both the intrinsic `width`/`height` (avoids layout shift before
  * the image loads) and the rendered box; pass `className` for extra decoration.
@@ -32,7 +33,7 @@ import { formatNumber } from '../lib/format.js';
 export function BrandMark({ size = 32, rounded = 'rounded-lg', className = '', alt = 'TransitSync logo' }) {
   return (
     <img
-      src="/busicon.png"
+      src={__BRAND_ICON_URL__}
       alt={alt}
       width={size}
       height={size}
@@ -194,7 +195,7 @@ export function Panel({ title, subtitle, actions, children, className = '', body
               {subtitle ? <p className="truncate text-[0.73rem] text-mist-500">{subtitle}</p> : null}
             </div>
           </div>
-          {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
+          {actions ? <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:shrink-0">{actions}</div> : null}
         </header>
       ) : null}
       <div className={bodyClass}>{children}</div>
@@ -210,7 +211,7 @@ export function PageHeader({ title, subtitle, actions, breadcrumb }) {
         <h1 className="text-xl font-bold tracking-tight text-mist-100 sm:text-2xl">{title}</h1>
         {subtitle ? <p className="mt-0.5 text-[0.82rem] text-mist-400">{subtitle}</p> : null}
       </div>
-      {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
+      {actions ? <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto">{actions}</div> : null}
     </header>
   );
 }
@@ -237,7 +238,7 @@ export function LoadingBlock({ label = 'Loading…', className = 'py-10' }) {
   );
 }
 
-export function SkeletonRows({ rows = 6, cols = 5 }) {
+export function SkeletonRows({ rows = 6, cols = 5, columns }) {
   return (
     <div className="space-y-2 p-3" aria-hidden="true">
       {Array.from({ length: rows }).map((_, rowIndex) => (
@@ -245,8 +246,8 @@ export function SkeletonRows({ rows = 6, cols = 5 }) {
           {Array.from({ length: cols }).map((__, colIndex) => (
             <div
               key={colIndex}
-              className="h-4 animate-pulse rounded bg-ink-700/50"
-              style={{ flex: colIndex === 0 ? '1.4' : '1', animationDelay: `${(rowIndex * cols + colIndex) * 40}ms` }}
+              className={`h-4 animate-pulse rounded bg-ink-700/50 ${HIDE_BELOW[columns?.[colIndex]?.hideBelow] ?? ''}`}
+              style={{ flex: colIndex === 0 ? '1.4' : '1', animationDelay: `${(rowIndex * cols + colIndex) * 20}ms` }}
             />
           ))}
         </div>
@@ -313,6 +314,19 @@ export function ErrorState({ error, onRetry, className = '' }) {
  * table stays stateless so pagination and sorting can be driven by the URL or
  * the API query.
  */
+/**
+ * Column visibility helper. Pages mark low-priority columns with
+ * `hideBelow: 'md' | 'lg' | ...`; they stay visible on wide screens and drop out
+ * on phones so the table never forces the whole page to scroll sideways.
+ */
+const HIDE_BELOW = {
+  sm: 'hidden sm:table-cell',
+  md: 'hidden md:table-cell',
+  lg: 'hidden lg:table-cell',
+  xl: 'hidden xl:table-cell',
+  '2xl': 'hidden 2xl:table-cell',
+};
+
 export function DataTable({
   columns,
   rows,
@@ -326,11 +340,11 @@ export function DataTable({
   rowClassName,
   stickyHeader = true,
 }) {
-  if (loading) return <SkeletonRows rows={skeletonRows} cols={columns.length} />;
+  if (loading) return <SkeletonRows rows={skeletonRows} cols={columns.length} columns={columns} />;
   if (!rows?.length) return empty ?? <EmptyState title="Nothing to show" />;
 
   return (
-    <div className="overflow-x-auto">
+    <div className="min-w-0 overflow-x-auto overscroll-x-contain">
       <table className="w-full border-collapse text-left">
         <thead className={stickyHeader ? 'sticky top-0 z-10 bg-[var(--surface-raised)]' : ''}>
           <tr className="border-b border-[var(--border-subtle)]">
@@ -341,7 +355,7 @@ export function DataTable({
               return (
                 <th
                   key={column.key}
-                  className={`th ${column.align === 'right' ? 'text-right' : column.align === 'center' ? 'text-center' : ''}`}
+                  className={`th ${column.align === 'right' ? 'text-right' : column.align === 'center' ? 'text-center' : ''} ${HIDE_BELOW[column.hideBelow] ?? ''}`}
                   aria-sort={active ? (sort.direction === 'asc' ? 'ascending' : 'descending') : undefined}
                 >
                   {sortable ? (
@@ -377,7 +391,7 @@ export function DataTable({
               className={`border-b border-[var(--border-subtle)]/60 transition last:border-0 hover:bg-brand-500/[0.06] ${onRowClick ? 'cursor-pointer' : ''} ${rowClassName?.(row) ?? ''}`}
             >
               {columns.map((column) => (
-                <td key={column.key} className={`td ${column.align === 'right' ? 'text-right' : column.align === 'center' ? 'text-center' : ''} ${column.nowrap ? 'whitespace-nowrap' : ''} ${column.className ?? ''}`}>
+                <td key={column.key} className={`td ${column.align === 'right' ? 'text-right' : column.align === 'center' ? 'text-center' : ''} ${column.nowrap ? 'whitespace-nowrap' : ''} ${HIDE_BELOW[column.hideBelow] ?? ''} ${column.className ?? ''}`}>
                   {column.render ? column.render(row, index) : row[column.key] ?? '—'}
                 </td>
               ))}
@@ -499,7 +513,7 @@ export function Modal({ open, onClose, title, subtitle, children, footer, size =
   }[size] ?? 'max-w-2xl';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:p-6">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-3 sm:p-6">
       <div
         className="fixed inset-0 bg-black/65 backdrop-blur-sm"
         onClick={onClose}
@@ -511,22 +525,22 @@ export function Modal({ open, onClose, title, subtitle, children, footer, size =
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={`card relative my-auto w-full ${width} shadow-2xl`}
+        className={`card ts-modal-in relative my-auto w-full min-w-0 overflow-x-clip ${width} shadow-2xl`}
       >
-        <header className="flex items-start justify-between gap-4 border-b border-[var(--border-subtle)] px-5 py-3.5">
+        <header className="flex items-start justify-between gap-3 border-b border-[var(--border-subtle)] px-4 py-3 sm:gap-4 sm:px-5 sm:py-3.5">
           <div className="min-w-0">
-            <h2 className="text-[0.95rem] font-bold text-mist-100">{title}</h2>
-            {subtitle ? <p className="mt-0.5 text-[0.75rem] text-mist-500">{subtitle}</p> : null}
+            <h2 className="text-[0.95rem] leading-snug font-bold text-mist-100 break-words">{title}</h2>
+            {subtitle ? <p className="mt-0.5 text-[0.75rem] leading-snug text-mist-500 break-words">{subtitle}</p> : null}
           </div>
-          <button type="button" onClick={onClose} className="btn btn-ghost !p-1.5" aria-label="Close dialog">
+          <button type="button" onClick={onClose} className="btn btn-ghost !p-1.5 shrink-0" aria-label="Close dialog">
             <Icon name="close" className="h-4 w-4" />
           </button>
         </header>
 
-        <div className="max-h-[calc(100dvh-14rem)] overflow-y-auto px-5 py-4">{children}</div>
+        <div className="max-h-[calc(100dvh-9rem)] overflow-x-hidden overflow-y-auto px-4 py-3.5 sm:max-h-[calc(100dvh-14rem)] sm:px-5 sm:py-4">{children}</div>
 
         {footer ? (
-          <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--border-subtle)] px-5 py-3">
+          <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--border-subtle)] px-4 py-3 sm:px-5">
             {footer}
           </footer>
         ) : null}
@@ -653,7 +667,7 @@ export function ProgressBar({ value = 0, tone = 'info', className = '', label })
       aria-valuemax={100}
       aria-label={label}
     >
-      <div className={`h-full rounded-full transition-[width] duration-500 ${bar}`} style={{ width: `${pct}%` }} />
+      <div className={`h-full rounded-full transition-[width] duration-250 ${bar}`} style={{ width: `${pct}%` }} />
     </div>
   );
 }
@@ -729,7 +743,7 @@ export function RouteProgressBar({ departureTime, arrivalTime, color = '#38bdf8'
         aria-label={`Route progress, ${departureTime} to ${arrivalTime}`}
       >
         <div
-          className="h-full rounded-full transition-[width] duration-700"
+          className="h-full rounded-full transition-[width] duration-350"
           style={{
             width: `${pct}%`,
             background: `linear-gradient(90deg, ${color}99, ${color})`,
@@ -769,7 +783,7 @@ export function Tooltip({ label, children, side = 'top' }) {
       {children}
       <span
         role="tooltip"
-        className={`pointer-events-none absolute z-50 hidden whitespace-nowrap rounded-md border border-[var(--border-subtle)] bg-ink-800 px-2 py-1 text-[0.68rem] font-medium text-mist-200 opacity-0 shadow-xl transition-opacity group-hover/tt:block group-hover/tt:opacity-100 ${position}`}
+        className={`pointer-events-none absolute z-50 hidden max-w-[min(16rem,calc(100vw-2rem))] rounded-md border border-[var(--border-subtle)] bg-ink-800 px-2 py-1 text-[0.68rem] leading-snug font-medium text-mist-200 break-words opacity-0 shadow-xl transition-opacity group-hover/tt:block group-hover/tt:opacity-100 ${position}`}
       >
         {label}
       </span>

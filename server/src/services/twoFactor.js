@@ -58,12 +58,9 @@ export function generateRecoveryCodes(count = RECOVERY_CODE_COUNT) {
   return codes;
 }
 
-export function storeRecoveryCodes(db, userId, codes) {
+export async function storeRecoveryCodes(db, userId, codes) {
   const payload = codes.map((code) => ({ h: hashCode(code), u: null }));
-  db.prepare("UPDATE users SET recovery_codes = ?, updated_at = datetime('now') WHERE id = ?").run(
-    JSON.stringify(payload),
-    userId,
-  );
+  await db.run("UPDATE users SET recovery_codes = ?, updated_at = NOW() WHERE id = ?", JSON.stringify(payload), userId);
 }
 
 export function remainingRecoveryCodes(user) {
@@ -75,7 +72,7 @@ export function remainingRecoveryCodes(user) {
 }
 
 /** Single-use: a matching unused code is marked used as it is accepted. */
-export function consumeRecoveryCode(db, user, code) {
+export async function consumeRecoveryCode(db, user, code) {
   let entries;
   try {
     entries = JSON.parse(user.recovery_codes || '[]');
@@ -87,47 +84,46 @@ export function consumeRecoveryCode(db, user, code) {
   if (!entry) return false;
 
   entry.u = new Date().toISOString();
-  db.prepare("UPDATE users SET recovery_codes = ?, updated_at = datetime('now') WHERE id = ?").run(
-    JSON.stringify(entries),
-    user.id,
-  );
+  await db.run("UPDATE users SET recovery_codes = ?, updated_at = NOW() WHERE id = ?", JSON.stringify(entries), user.id);
   return true;
 }
 
 // ---------------------------------------------------------------------------
 // Login challenges
 // ---------------------------------------------------------------------------
-export function createChallenge(db, user, { method, remember = false, ip = null, userAgent = null, device = null } = {}) {
+export async function createChallenge(db, user, { method, remember = false, ip = null, userAgent = null, device = null } = {}) {
   const id = crypto.randomUUID();
-  db.prepare(
+  await db.run(
     `INSERT INTO login_challenges (id, user_id, method, remember, ip, user_agent, device, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', ?))`,
-  ).run(id, user.id, method, remember ? 1 : 0, ip, userAgent, device, `+${CHALLENGE_TTL_MINUTES} minutes`);
+     VALUES (?, ?, ?, ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? MINUTE))`,
+    id, user.id, method, remember ? 1 : 0, ip, userAgent, device, CHALLENGE_TTL_MINUTES,
+  );
   return getChallenge(db, id);
 }
 
-export function getChallenge(db, id) {
+export async function getChallenge(db, id) {
   if (!id) return null;
-  return db
-    .prepare(
-      `SELECT * FROM login_challenges
-        WHERE id = ? AND consumed_at IS NULL AND expires_at > datetime('now')`,
-    )
-    .get(id);
+  return db.get(
+    `SELECT * FROM login_challenges
+      WHERE id = ? AND consumed_at IS NULL AND expires_at > NOW()`,
+    id,
+  );
 }
 
-export function consumeChallenge(db, id) {
-  db.prepare("UPDATE login_challenges SET consumed_at = datetime('now') WHERE id = ?").run(id);
+export async function consumeChallenge(db, id) {
+  await db.run("UPDATE login_challenges SET consumed_at = NOW() WHERE id = ?", id);
 }
 
 /** Count a bad guess; burn the challenge once the budget is spent. */
-export function recordChallengeFailure(db, id) {
-  const row = db.prepare('SELECT attempts FROM login_challenges WHERE id = ?').get(id);
+export async function recordChallengeFailure(db, id) {
+  const row = await db.get('SELECT attempts FROM login_challenges WHERE id = ?', id);
   if (!row) return;
   const attempts = row.attempts + 1;
-  db.prepare('UPDATE login_challenges SET attempts = ?, consumed_at = ? WHERE id = ?').run(
+  await db.run(
+    attempts >= MAX_ATTEMPTS
+      ? 'UPDATE login_challenges SET attempts = ?, consumed_at = NOW() WHERE id = ?'
+      : 'UPDATE login_challenges SET attempts = ?, consumed_at = NULL WHERE id = ?',
     attempts,
-    attempts >= MAX_ATTEMPTS ? new Date().toISOString() : null,
     id,
   );
 }
@@ -137,15 +133,17 @@ export function recordChallengeFailure(db, id) {
 // ---------------------------------------------------------------------------
 export async function issueEmailOtp(db, user, { purpose = 'LOGIN_2FA' } = {}) {
   // Invalidate any outstanding code for this purpose so only the newest works.
-  db.prepare(
-    "UPDATE email_otp_codes SET consumed_at = datetime('now') WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL",
-  ).run(user.id, purpose);
+  await db.run(
+    "UPDATE email_otp_codes SET consumed_at = NOW() WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL",
+    user.id, purpose,
+  );
 
   const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
-  db.prepare(
+  await db.run(
     `INSERT INTO email_otp_codes (id, user_id, code_hash, purpose, expires_at)
-     VALUES (?, ?, ?, ?, datetime('now', ?))`,
-  ).run(crypto.randomUUID(), user.id, hashCode(code), purpose, `+${OTP_TTL_MINUTES} minutes`);
+     VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? MINUTE))`,
+    crypto.randomUUID(), user.id, hashCode(code), purpose, OTP_TTL_MINUTES,
+  );
 
   const result = await sendMail({
     to: user.email,
@@ -158,42 +156,41 @@ export async function issueEmailOtp(db, user, { purpose = 'LOGIN_2FA' } = {}) {
   return { ...result, ttlMinutes: OTP_TTL_MINUTES };
 }
 
-export function verifyEmailOtp(db, userId, code, purpose = 'LOGIN_2FA') {
-  const row = db
-    .prepare(
-      `SELECT * FROM email_otp_codes
-        WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL AND expires_at > datetime('now')
-        ORDER BY created_at DESC LIMIT 1`,
-    )
-    .get(userId, purpose);
+export async function verifyEmailOtp(db, userId, code, purpose = 'LOGIN_2FA') {
+  const row = await db.get(
+    `SELECT * FROM email_otp_codes
+      WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL AND expires_at > NOW()
+      ORDER BY created_at DESC LIMIT 1`,
+    userId, purpose,
+  );
   if (!row) return false;
 
   if (row.code_hash !== hashCode(code)) {
-    db.prepare('UPDATE email_otp_codes SET attempts = attempts + 1 WHERE id = ?').run(row.id);
+    await db.run('UPDATE email_otp_codes SET attempts = attempts + 1 WHERE id = ?', row.id);
     return false;
   }
 
-  db.prepare("UPDATE email_otp_codes SET consumed_at = datetime('now') WHERE id = ?").run(row.id);
+  await db.run("UPDATE email_otp_codes SET consumed_at = NOW() WHERE id = ?", row.id);
   return true;
 }
 
 /** TOTP, email code, or a one-time recovery code. */
-export function verifyChallengeCode(db, user, challenge, code) {
+export async function verifyChallengeCode(db, user, challenge, code) {
   if (challenge.method === 'TOTP') {
     if (verifyCode(user.totp_secret, code)) return { ok: true, via: 'TOTP' };
-    if (consumeRecoveryCode(db, user, code)) return { ok: true, via: 'RECOVERY_CODE' };
+    if (await consumeRecoveryCode(db, user, code)) return { ok: true, via: 'RECOVERY_CODE' };
     return { ok: false };
   }
   if (challenge.method === 'EMAIL') {
-    return verifyEmailOtp(db, user.id, code) ? { ok: true, via: 'EMAIL' } : { ok: false };
+    return (await verifyEmailOtp(db, user.id, code)) ? { ok: true, via: 'EMAIL' } : { ok: false };
   }
   return { ok: false };
 }
 
 /** Housekeeping — drop challenges and codes that can no longer be used. */
-export function purgeExpired(db) {
-  db.prepare("DELETE FROM login_challenges WHERE expires_at < datetime('now', '-1 day')").run();
-  db.prepare("DELETE FROM email_otp_codes WHERE expires_at < datetime('now', '-1 day')").run();
+export async function purgeExpired(db) {
+  await db.run("DELETE FROM login_challenges WHERE expires_at < DATE_SUB(NOW(), INTERVAL 1 DAY)");
+  await db.run("DELETE FROM email_otp_codes WHERE expires_at < DATE_SUB(NOW(), INTERVAL 1 DAY)");
 }
 
 export default {

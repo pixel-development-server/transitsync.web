@@ -18,6 +18,38 @@ import { useEventStream } from '../lib/stream.js';
 import { NAV_SECTIONS, canSeeNavItem } from '../lib/nav.js';
 import { initials } from '../lib/format.js';
 
+/**
+ * Sidebar glyph.
+ *
+ * The "Buses & Routes" entry renders the branded `busicon.png` mark, so the
+ * navigation carries the same artwork as the header instead of a generic line
+ * icon. The raster is fully opaque, so it is framed with a hairline ring that
+ * keeps it legible on both the light and dark sidebar. Every other entry uses
+ * the shared inline `Icon` set.
+ */
+function NavGlyph({ name, isActive }) {
+  if (name === 'bus') {
+    return (
+      <img
+        src="/busicon.png"
+        alt=""
+        aria-hidden="true"
+        width={16}
+        height={16}
+        draggable={false}
+        className="h-4 w-4 shrink-0 rounded-[5px] object-contain ring-1 ring-black/10 select-none dark:ring-white/20"
+      />
+    );
+  }
+
+  return (
+    <Icon
+      name={name}
+      className={`h-4 w-4 shrink-0 ${isActive ? 'text-brand-500' : 'text-mist-500 group-hover:text-mist-300'}`}
+    />
+  );
+}
+
 const THEME_KEY = 'transitsync.theme';
 const SIDEBAR_KEY = 'transitsync.sidebar.collapsed';
 
@@ -177,7 +209,7 @@ export default function Layout() {
       ) : null}
 
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-60 flex-col border-r border-[var(--border-subtle)] bg-[var(--glass-fill-strong)] backdrop-blur-xl transition-all duration-300 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-60 max-w-[85vw] flex-col border-r border-[var(--border-subtle)] bg-[var(--glass-fill-strong)] backdrop-blur-xl transition-all duration-150 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] lg:static lg:translate-x-0 ${
           collapsed ? 'lg:w-20' : 'lg:w-64'
         } ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
       >
@@ -244,10 +276,7 @@ export default function Layout() {
                     >
                       {({ isActive }) => (
                         <>
-                          <Icon
-                            name={item.icon}
-                            className={`h-4 w-4 shrink-0 ${isActive ? 'text-brand-500' : 'text-mist-500 group-hover:text-mist-300'}`}
-                          />
+                          <NavGlyph name={item.icon} isActive={isActive} />
                           <span className={`flex-1 truncate ${collapsed ? 'lg:hidden' : ''}`}>
                             {item.label}
                           </span>
@@ -291,7 +320,7 @@ export default function Layout() {
             </button>
           </div>
           <p className={`px-2 text-[0.63rem] leading-relaxed text-mist-500 ${collapsed ? 'lg:hidden' : ''}`}>
-            v1.0.0 · SQLite · SSE
+            v1.0.0 · MariaDB · SSE
           </p>
         </div>
       </aside>
@@ -381,7 +410,7 @@ export default function Layout() {
             {menuOpen ? (
               <div
                 role="menu"
-                className="card absolute right-0 z-50 mt-2 w-60 overflow-hidden py-1 shadow-2xl"
+                className="card absolute right-0 z-50 mt-2 w-60 max-w-[calc(100vw-2rem)] overflow-hidden py-1 shadow-2xl"
               >
                 <div className="border-b border-[var(--border-subtle)] px-3.5 py-2.5">
                   <p className="truncate text-[0.82rem] font-semibold text-mist-100">{user?.fullName}</p>
@@ -440,8 +469,8 @@ export default function Layout() {
           </ErrorBoundary>
         </main>
 
-        <footer className="shrink-0 border-t border-[var(--border-subtle)] px-6 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
-          <p className="text-[0.7rem] text-mist-500">
+        <footer className="shrink-0 border-t border-[var(--border-subtle)] px-4 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:px-6">
+          <p className="text-[0.7rem] leading-snug text-mist-500 break-words">
             TransitSync • RFID campus shuttle management
             {user?.institutionName ? ` · ${user?.institutionName}` : ''}
           </p>

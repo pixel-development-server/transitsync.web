@@ -1,15 +1,63 @@
+# ---------------------------------------------------------------------------
+# TransitSync — repository hygiene
+# Secrets, local data, logs and build output must never reach Git.
+# ---------------------------------------------------------------------------
+
+# Dependencies
 node_modules/
+.pnpm-store/
+
+# Build output (build/sketch.ino is tracked source — ignore only build output)
 dist/
+dist-ssr/
+build/dist/
+coverage/
+*.tsbuildinfo
+
+# Environment files and secrets. .env.example files are safe templates.
+.env
+.env.*
+!.env.example
+!.env.example.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
+credentials.json
+*-credentials.json
+service-account*.json
+certs/
+
+# Local databases, dumps and backups
 data/
+storage/
+backups/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
-.env
-.env.local
-backups/
-npm-debug.log*
+*.sqlite
+*.sqlite-*
+*.sql.gz
+*.dump
+*.bak
+
+# Logs and runtime state
+logs/
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pm2/
+*.pid
+transitsync-service.active
+
+# Editors / OS
 .DS_Store
+Thumbs.db
 .vscode/
 .idea/

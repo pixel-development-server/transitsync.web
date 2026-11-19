@@ -1,5 +1,6 @@
 import express from 'express';
 
+import { asyncHandler } from '../lib/http.js';
 import { authenticate, requirePasswordRotated } from '../middleware/auth.js';
 import authRoutes from './auth.routes.js';
 import userRoutes, { rolesRouter } from './users.routes.js';
@@ -18,17 +19,18 @@ import systemRoutes from './system.routes.js';
 import institutionRoutes from './institution.routes.js';
 import superAdminRoutes from './superadmin.routes.js';
 import studentPortalRoutes from './student.routes.js';
+import bookingRoutes from './bookings.routes.js';
 import { getDb } from '../db/connection.js';
 import { hub } from '../services/realtime.js';
 
 const router = express.Router();
 
 /** Liveness + build info. Public by design so it can sit behind a load balancer. */
-router.get('/health', (req, res) => {
+router.get('/health', asyncHandler(async (req, res) => {
   const db = getDb();
   let database = 'down';
   try {
-    db.prepare('SELECT 1').get();
+    await db.get('SELECT 1');
     database = 'up';
   } catch {
     database = 'down';
@@ -44,7 +46,7 @@ router.get('/health', (req, res) => {
       timestamp: new Date().toISOString(),
     },
   });
-});
+}));
 
 // ---------------------------------------------------------------------------
 // Bootstrap surface. Deliberately mounted OUTSIDE the forced-rotation gate so a
@@ -97,5 +99,7 @@ router.use('/institution', institutionRoutes);
 router.use('/super-admin', superAdminRoutes);
 // Rider portal — exclusive to the Level 1 `student` role.
 router.use('/student', studentPortalRoutes);
+// Daily route/bus bookings — riders manage their own, staff read the ledger.
+router.use('/bookings', bookingRoutes);
 
 export default router;

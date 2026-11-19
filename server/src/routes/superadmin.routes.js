@@ -38,7 +38,7 @@ router.use(requireSuperAdmin);
 router.get(
   '/maintenance',
   asyncHandler(async (req, res) => {
-    res.json({ success: true, data: getMaintenance() });
+    res.json({ success: true, data: await getMaintenance() });
   }),
 );
 
@@ -51,7 +51,7 @@ router.patch(
   validate(maintenanceSchema),
   asyncHandler(async (req, res) => {
     const { enabled, message } = req.body;
-    const state = setMaintenance(getDb(), { enabled, message, updatedBy: req.user.id });
+    const state = await setMaintenance(getDb(), { enabled, message, updatedBy: req.user.id });
     recordAudit(
       fromRequest(req, 'platform.maintenance', { entity: 'system', detail: { ...state } }),
     );
@@ -67,7 +67,7 @@ router.patch(
 router.get(
   '/colleges',
   asyncHandler(async (req, res) => {
-    res.json({ success: true, data: { colleges: listColleges(getDb()) } });
+    res.json({ success: true, data: { colleges: await listColleges(getDb()) } });
   }),
 );
 
@@ -101,7 +101,7 @@ router.patch(
   validate(collegeIdSchema, 'params'),
   validate(collegeStatusSchema),
   asyncHandler(async (req, res) => {
-    const college = setCollegeStatus(getDb(), req.params.id, req.body.status);
+    const college = await setCollegeStatus(getDb(), req.params.id, req.body.status);
     recordAudit(
       fromRequest(req, 'platform.college.status', {
         entity: 'institution',
@@ -119,7 +119,7 @@ router.put(
   validate(collegeIdSchema, 'params'),
   validate(collegeUpdateSchema),
   asyncHandler(async (req, res) => {
-    const college = updateCollege(getDb(), req.params.id, req.body);
+    const college = await updateCollege(getDb(), req.params.id, req.body);
     recordAudit(
       fromRequest(req, 'platform.college.update', {
         entity: 'institution',
@@ -144,7 +144,7 @@ router.delete(
   validate(collegeIdSchema, 'params'),
   asyncHandler(async (req, res) => {
     const purge = req.query.purge === 'true' || req.body?.purge === true;
-    const result = deleteCollege(getDb(), req.params.id, { purge });
+    const result = await deleteCollege(getDb(), req.params.id, { purge });
 
     recordAudit(
       fromRequest(req, purge ? 'platform.college.purge' : 'platform.college.delete', {
@@ -173,7 +173,7 @@ router.get(
   asyncHandler(async (req, res) => {
     res.json({
       success: true,
-      data: { ...platformOverview(getDb()), maintenance: getMaintenance() },
+      data: { ...(await platformOverview(getDb())), maintenance: await getMaintenance() },
     });
   }),
 );

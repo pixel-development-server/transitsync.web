@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------------------
+# TransitSync — Caddy v2 reverse proxy + static SPA server (local homelab)
+#
+#   Validate: caddy validate --config Caddyfile
+#   Run     : caddy run --config Caddyfile            (foreground)
+#   Service : caddy start --config Caddyfile          (background)
+#   Reload  : caddy reload --config Caddyfile         (after a rebuild)
+#
+# Caddy terminates TLS on :443, serves the built SPA from client/dist, and
+# reverse-proxies the API to the local PM2 process. Nothing here leaves the
+# local machine: no CDN, no external build, no webhook.
+# ---------------------------------------------------------------------------
+
+transitsync.me {
+	# Automatic HTTPS uses Let's Encrypt (ACME) by default, which needs public
+	# DNS for transitsync.me and inbound :80/:443. For a fully offline homelab
+	# (local hosts-file DNS, no internet), comment nothing out — just uncomment
+	# the next line to issue a certificate from Caddy's own local CA instead:
+	#
+	#	tls internal
+
+	# --- API + Server-Sent Events -------------------------------------------
+	# A single `handle` owns everything under /api. SSE lives at /api/stream and
+	# streams straight through the proxy.
+	handle /api/* {
+		reverse_proxy localhost:3000
+	}
+
+	# --- Reserved WebSocket namespace ---------------------------------------
+	handle /socket.io/* {
+		reverse_proxy localhost:3000
+	}
+
+	# --- Built SPA + client-side routing fallback ---------------------------
+	# `handle` blocks are mutually exclusive and evaluated in order, so the
+	# catch-all below only sees non-API traffic. Keep `try_files` *inside* this
+	# block: at the site root it would rewrite /api/* to /index.html before the
+	# proxy runs. gzip is scoped here too so it never buffers the SSE stream
+	# (Express already compresses the API and excludes the stream itself).
+	handle {
+		root * C:/SYP/client/dist
+		encode gzip
+		try_files {path} {path}/ /index.html
+		file_server
+	}
+}

@@ -1,17 +1,20 @@
 /**
  * Formatting helpers.
  *
- * The API returns SQLite timestamps as `YYYY-MM-DD HH:MM:SS` in **UTC** with no
- * zone marker. Passing those straight to `new Date()` makes browsers treat them
- * as local time, which silently shifts every scan by the viewer's offset — on
- * this project it rendered times up to 5h45m off in Kathmandu. `parseSqlDate`
- * pins them to UTC explicitly; plain ISO strings (`2026-10-02T10:32:41Z`) are
- * already zoned and pass through untouched.
+ * The API returns bare `YYYY-MM-DD HH:MM:SS` strings with no zone marker, and
+ * they are **Nepal Time** — the MySQL session runs at `+05:45`, so they are the
+ * very wall clocks `NOW()` stamped. Passing them straight to `new Date()` makes
+ * browsers treat them as *device* local time, which silently shifts every scan
+ * by the viewer's offset — Kathmandu is right only by luck, anywhere else drifts
+ * by hours. `parseSqlDate` pins bare stamps to NPT explicitly; plain ISO
+ * strings (`2026-10-02T10:32:41Z`) are already zoned and pass through
+ * untouched.
  */
 
 const SQL_DATE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/;
+const NPT_OFFSET_MS = (5 * 60 + 45) * 60 * 1000;
 
-/** Parse an API timestamp as UTC. Returns null for empty/invalid input. */
+/** Parse an API timestamp (bare stamps read as Nepal Time). Null if invalid. */
 export function parseSqlDate(value) {
   if (!value) return null;
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
@@ -19,7 +22,9 @@ export function parseSqlDate(value) {
   const match = SQL_DATE.exec(value);
   if (match) {
     const [, y, mo, d, h, mi, s] = match;
-    return new Date(Date.UTC(+y, +mo - 1, +d, +h, +mi, +s));
+    // Build the instant as if the wall clock were UTC, then step back the NPT
+    // offset: 19:14:03 in Kathmandu is 13:29:03Z.
+    return new Date(Date.UTC(+y, +mo - 1, +d, +h, +mi, +s) - NPT_OFFSET_MS);
   }
 
   // Date-only values (`2024-11-30`) are calendar dates, not instants: anchoring

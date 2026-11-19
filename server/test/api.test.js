@@ -105,12 +105,51 @@ test('student CRUD lifecycle', async () => {
   assert.equal(afterDelete.body.data.student.status, 'WITHDRAWN');
   assert.equal(afterDelete.body.data.student.cardStatus, 'REVOKED');
 
-  // Purge
+  // Purge — the transactional cleanup path: bookings die with the roster row,
+  // scan attribution is detached (history survives), and the linked portal
+  // login is removed once nothing references it.
+  const studentRow = await ctx.db.get('SELECT tenant_id FROM students WHERE id = ?', id);
+  const tenant = studentRow?.tenant_id ?? null;
+
+  await ctx.db.run(
+    'INSERT INTO student_bookings (student_id, travel_date, tenant_id) VALUES (?, ?, ?)',
+    id, '2030-01-15', tenant,
+  );
+  await ctx.db.run(
+    `INSERT INTO scan_events (rfid_serial, student_id, direction, outcome, message)
+     VALUES (?, ?, 'BOARD', 'VALID', 'pre-purge scan')`,
+    'TS-PURGE-1', id,
+  );
+  const studentRoleId = await roleIdOf(ctx, ROLE_KEYS.STUDENT);
+  const linkedUser = await ctx.db.run(
+    `INSERT INTO users (email, full_name, password_hash, role_id, tenant_id, status)
+     VALUES (?, ?, ?, ?, ?, 'active')`,
+    `purge-linked-${id}@transitsync.edu.np`, 'Purge Linked Login',
+    '$2a$12$C5KvB9p1q2r3s4t5u6v7w8x9y0zAbCdEfGhIjKlMnOpQrStUvWxYz',
+    studentRoleId, tenant,
+  );
+  const linkedUserId = Number(linkedUser.lastInsertRowid);
+  await ctx.db.run('UPDATE students SET user_id = ? WHERE id = ?', linkedUserId, id);
+
   const purged = await call(ctx, 'DELETE', `/api/students/${id}/purge`, { token: admin.token });
   assert.equal(purged.status, 200);
+  assert.equal(purged.body.data.removed.bookings, 1, 'the bus booking is removed with the roster row');
+  assert.equal(purged.body.data.removed.accountRemoved, true, 'the linked portal login is removed');
 
   const gone = await call(ctx, 'GET', `/api/students/${id}`, { token: admin.token });
   assert.equal(gone.status, 404);
+
+  assert.equal(
+    (await ctx.db.get('SELECT COUNT(*) AS n FROM student_bookings WHERE student_id = ?', id)).n,
+    0,
+  );
+  assert.ok(
+    !(await ctx.db.get('SELECT id FROM users WHERE id = ?', linkedUserId)),
+    'the linked student-role login is gone',
+  );
+  const scanRow = await ctx.db.get('SELECT student_id FROM scan_events WHERE rfid_serial = ?', 'TS-PURGE-1');
+  assert.ok(scanRow, 'scan history rows survive for analytics');
+  assert.equal(scanRow.student_id, null, 'but their attribution to the purged row is detached');
 });
 
 test('duplicate college ID and RFID serial are rejected', async () => {
@@ -155,9 +194,11 @@ test('student list filters, searches and paginates', async () => {
   }
 });
 
-test('allocating a student beyond seat capacity is refused', async () => {
-  // Build a deliberately tiny bus so the guard is exercised deterministically
-  // rather than depending on how the seed happened to distribute students.
+test('roster creation is not gated by seat capacity', async () => {
+  // Per-student bus allocation was retired (`students.bus_id` is gone): rows
+  // ride by route, not by seat assignment, so `busId` in the create body is
+  // inert and a full bus never blocks the roster. Build a deliberately tiny bus
+  // to prove a second "overflow" row is still accepted.
   const bus = await call(ctx, 'POST', '/api/buses', {
     token: admin.token,
     body: { code: 'TS-TINY', registrationNo: 'Ba 1 Ti 0001', name: 'Tiny Coach', seatCapacity: 1 },
@@ -169,25 +210,13 @@ test('allocating a student beyond seat capacity is refused', async () => {
     token: admin.token,
     body: { fullName: 'Fills The Bus', collegeId: `KMI-CAP-${Date.now()}`, busId, cardStatus: 'ACTIVE' },
   });
-  assert.equal(first.status, 201, 'the first allocation fits');
+  assert.equal(first.status, 201, 'the first roster row is created');
 
   const overflow = await call(ctx, 'POST', '/api/students', {
     token: admin.token,
     body: { fullName: 'One Seat Too Many', collegeId: `KMI-CAP2-${Date.now()}`, busId, cardStatus: 'ACTIVE' },
   });
-  assert.equal(overflow.status, 409);
-  assert.match(overflow.body.error.message, /capacity/i);
-
-  // Freeing the seat lets the next allocation through.
-  await call(ctx, 'PATCH', `/api/students/${first.body.data.student.id}`, {
-    token: admin.token,
-    body: { clearBus: true },
-  });
-  const retry = await call(ctx, 'POST', '/api/students', {
-    token: admin.token,
-    body: { fullName: 'Now It Fits', collegeId: `KMI-CAP3-${Date.now()}`, busId, cardStatus: 'ACTIVE' },
-  });
-  assert.equal(retry.status, 201);
+  assert.equal(overflow.status, 201, 'nothing is allocated per-student, so seat capacity cannot conflict');
 });
 
 // ---------------------------------------------------------------------------
@@ -218,46 +247,38 @@ test('bus CRUD with capacity guards', async () => {
   assert.equal(patched.body.data.bus.seatCapacity, 30);
   assert.equal(patched.body.data.bus.status, 'MAINTENANCE');
 
-  // Seat capacity may never drop below the number of allocated students.
-  // Allocate two first, otherwise shrinking to 1 seat is perfectly legal.
-  for (const n of [1, 2]) {
-    const allocated = await call(ctx, 'POST', '/api/students', {
-      token: admin.token,
-      body: {
-        fullName: `Seat Filler ${n}`,
-        collegeId: `KMI-SEAT-${busId}-${n}`,
-        busId,
-        cardStatus: 'ACTIVE',
-      },
-    });
-    assert.equal(allocated.status, 201, `student ${n} should be allocated to the bus`);
-  }
-
-  const tooSmall = await call(ctx, 'PATCH', `/api/buses/${busId}`, {
+  // Seat capacity no longer tracks allocations — per-student allocation was
+  // retired — so shrinking is legal at any size; the historical "cannot drop
+  // below the allocation" guard is inert by design.
+  const shrunk = await call(ctx, 'PATCH', `/api/buses/${busId}`, {
     token: staff.token,
     body: { seatCapacity: 1 },
   });
-  assert.ok(
-    [400, 409].includes(tooSmall.status),
-    `shrinking to 1 seat with 2 allocated must fail, got ${tooSmall.status}`,
-  );
-
-  // Exactly matching the allocation is still allowed.
-  const exact = await call(ctx, 'PATCH', `/api/buses/${busId}`, {
-    token: staff.token,
-    body: { seatCapacity: 2 },
-  });
-  assert.equal(exact.status, 200, 'matching the allocation exactly is allowed');
+  assert.equal(shrunk.status, 200, 'shrinking is legal once nothing is allocated per-student');
+  assert.equal(shrunk.body.data.bus.seatCapacity, 1);
 
   const removed = await call(ctx, 'DELETE', `/api/buses/${busId}`, { token: staff.token });
   assert.equal(removed.status, 403, 'transport staff cannot delete fleet records');
 });
 
-test('a bus with allocated students cannot be deleted', async () => {
-  const bus = ctx.db.prepare("SELECT id FROM buses WHERE status='ACTIVE'").get();
+test('deleting a bus dereferences the riders aboard it', async () => {
+  // With per-student allocation retired there is nothing to reassign: the
+  // delete is legal, and `fk_students_onboard` (ON DELETE SET NULL) carries the
+  // occupancy pointers off the bus with it.
+  const bus = await ctx.db.get(
+    `SELECT b.id FROM buses b
+      WHERE b.status = 'ACTIVE'
+        AND EXISTS (SELECT 1 FROM students s WHERE s.onboard_bus_id = b.id)
+      ORDER BY b.id DESC LIMIT 1`,
+  );
+  assert.ok(bus, 'the demo dataset must place someone aboard a bus');
   const response = await call(ctx, 'DELETE', `/api/buses/${bus.id}`, { token: admin.token });
-  assert.equal(response.status, 409);
-  assert.match(response.body.error.message, /allocated/i);
+  assert.equal(response.status, 200);
+  const orphaned = await ctx.db.get(
+    'SELECT COUNT(*) AS n FROM students WHERE onboard_bus_id = ?',
+    bus.id,
+  );
+  assert.equal(orphaned.n, 0, 'no rider keeps a pointer at the deleted bus');
 });
 
 test('route stop ordering is validated and persisted', async () => {
@@ -290,7 +311,7 @@ test('route stop ordering is validated and persisted', async () => {
 });
 
 test('a referenced route cannot be deleted', async () => {
-  const route = ctx.db.prepare('SELECT id, code FROM routes WHERE id = 1').get();
+  const route = await ctx.db.get('SELECT id, code FROM routes WHERE id = 1');
   const response = await call(ctx, 'DELETE', `/api/routes/${route.id}`, { token: admin.token });
   assert.equal(response.status, 409);
 });
@@ -318,21 +339,20 @@ test('a valid tap boards then a second tap deboards the same student', async () 
   const simulator = await call(ctx, 'GET', '/api/simulator', { token: admin.token });
   assert.equal(simulator.status, 200);
 
-  const student = ctx.db
-    .prepare(
-      `SELECT * FROM students
-        WHERE rfid_serial IS NOT NULL AND status='ACTIVE' AND card_status='ACTIVE'
-          AND bus_id IS NOT NULL AND onboard_bus_id IS NULL
-        LIMIT 1`,
-    )
-    .get();
+  const student = await ctx.db.get(
+    `SELECT * FROM students
+      WHERE rfid_serial IS NOT NULL AND status='ACTIVE' AND card_status='ACTIVE'
+        AND onboard_bus_id IS NULL
+      LIMIT 1`,
+  );
   // The seed deliberately leaves some students waiting at the stop; without that
   // the first tap would deboard an already-onboard student.
   assert.ok(student, 'the demo dataset must contain a student waiting to board');
+  const bus = await ctx.db.get("SELECT id FROM buses WHERE status = 'ACTIVE' ORDER BY id LIMIT 1");
 
   const board = await call(ctx, 'POST', '/api/simulator/tap', {
     token: admin.token,
-    body: { rfidSerial: student.rfid_serial, busId: student.bus_id, gate: 'Test Gate', latitude: 27.7, longitude: 85.3 },
+    body: { rfidSerial: student.rfid_serial, busId: bus.id, gate: 'Test Gate', latitude: 27.7, longitude: 85.3 },
   });
   assert.equal(board.status, 200);
   assert.equal(board.body.data.outcome, 'VALID');
@@ -342,7 +362,7 @@ test('a valid tap boards then a second tap deboards the same student', async () 
 
   const deboard = await call(ctx, 'POST', '/api/simulator/tap', {
     token: admin.token,
-    body: { rfidSerial: student.rfid_serial, busId: student.bus_id, gate: 'Test Gate' },
+    body: { rfidSerial: student.rfid_serial, busId: bus.id, gate: 'Test Gate' },
   });
   assert.equal(deboard.body.data.direction, 'DEBOARD');
   assert.equal(deboard.body.data.outcome, 'VALID');
@@ -401,10 +421,21 @@ test('an unregistered serial is rejected with the right alert tag', async () => 
 });
 
 test('a registered card on the wrong bus is logged without raising an alert', async () => {
-  const student = ctx.db
-    .prepare("SELECT * FROM students WHERE bus_id IS NOT NULL AND status='ACTIVE' AND card_status='ACTIVE' LIMIT 1")
-    .get();
-  const otherBus = ctx.db.prepare('SELECT id FROM buses WHERE id <> ? AND status <> ? LIMIT 1').get(student.bus_id, 'RETIRED');
+  // Students are no longer allocated per bus (`students.bus_id` is gone); the
+  // live pointer is `onboard_bus_id`, so the "wrong bus" is any bus other than
+  // the one the student is currently aboard.
+  const student = await ctx.db.get(
+    "SELECT * FROM students WHERE status='ACTIVE' AND card_status='ACTIVE' AND rfid_serial IS NOT NULL LIMIT 1",
+  );
+  assert.ok(student, 'the demo dataset must contain an active card');
+  const homeBus = await ctx.db.get("SELECT id FROM buses WHERE status = 'ACTIVE' ORDER BY id LIMIT 1");
+  const otherBus = await ctx.db.get(
+    "SELECT id FROM buses WHERE status = 'ACTIVE' AND id <> ? ORDER BY id LIMIT 1",
+    homeBus.id,
+  );
+  assert.ok(otherBus, 'the fleet must have at least two active buses');
+  // Park the rider aboard one bus — a tap on a *different* bus must be refused.
+  await ctx.db.run('UPDATE students SET onboard_bus_id = ?, onboard_at = NOW() WHERE id = ?', homeBus.id, student.id);
 
   const response = await call(ctx, 'POST', '/api/simulator/tap', {
     token: admin.token,
@@ -412,45 +443,47 @@ test('a registered card on the wrong bus is logged without raising an alert', as
   });
   assert.equal(response.body.data.outcome, 'UNREGISTERED_BUS');
   assert.equal(response.body.data.alert, null, 'only unknown UIDs raise an Unregistered Alert');
+
+  // Leave occupancy exactly as we found it so later tests count the same rows.
+  await ctx.db.run('UPDATE students SET onboard_bus_id = ?, onboard_at = ? WHERE id = ?',
+    student.onboard_bus_id ?? null, student.onboard_at ?? null, student.id);
 });
 
 test('a revoked card is invalid, silent, and does not change occupancy', async () => {
-  const student = ctx.db.prepare("SELECT * FROM students WHERE card_status = 'REVOKED' LIMIT 1").get();
+  const student = await ctx.db.get("SELECT * FROM students WHERE card_status = 'REVOKED' LIMIT 1");
   // Never skip silently: a missing fixture must fail loudly, otherwise this test
   // reports success while asserting nothing at all.
   assert.ok(student, 'the demo dataset must contain a revoked card');
+  const bus = await ctx.db.get("SELECT id FROM buses WHERE status = 'ACTIVE' ORDER BY id LIMIT 1");
 
-  const before = ctx.db
-    .prepare('SELECT COUNT(*) AS n FROM students WHERE onboard_bus_id = ?')
-    .get(student.bus_id).n;
+  const before = (await ctx.db.get('SELECT COUNT(*) AS n FROM students WHERE onboard_bus_id = ?', bus.id)).n;
 
   const response = await call(ctx, 'POST', '/api/simulator/tap', {
     token: admin.token,
-    body: { rfidSerial: student.rfid_serial, busId: student.bus_id },
+    body: { rfidSerial: student.rfid_serial, busId: bus.id },
   });
   assert.equal(response.body.data.outcome, 'INVALID');
   assert.equal(response.body.data.alert, null, 'a revoked card is an activity log entry, not an alert');
 
-  const after = ctx.db
-    .prepare('SELECT COUNT(*) AS n FROM students WHERE onboard_bus_id = ?')
-    .get(student.bus_id).n;
+  const after = (await ctx.db.get('SELECT COUNT(*) AS n FROM students WHERE onboard_bus_id = ?', bus.id)).n;
   assert.equal(after, before, 'a rejected tap must not alter occupancy');
 });
 
 test('preview mode explains a verdict without writing a scan', async () => {
-  const before = ctx.db.prepare('SELECT COUNT(*) AS n FROM scan_events').get().n;
+  const before = (await ctx.db.get('SELECT COUNT(*) AS n FROM scan_events')).n;
 
-  const student = ctx.db.prepare("SELECT * FROM students WHERE card_status = 'REVOKED' LIMIT 1").get();
+  const student = await ctx.db.get("SELECT * FROM students WHERE card_status = 'REVOKED' LIMIT 1");
+  const bus = await ctx.db.get("SELECT id FROM buses WHERE status = 'ACTIVE' ORDER BY id LIMIT 1");
   const preview = await call(ctx, 'POST', '/api/simulator/preview', {
     token: admin.token,
-    body: { rfidSerial: student.rfid_serial, busId: student.bus_id },
+    body: { rfidSerial: student.rfid_serial, busId: bus.id },
   });
   assert.equal(preview.status, 200);
   assert.equal(preview.body.data.outcome, 'INVALID');
   assert.equal(preview.body.data.wouldAlert, false);
   assert.equal(preview.body.data.alertLabel, null);
 
-  const after = ctx.db.prepare('SELECT COUNT(*) AS n FROM scan_events').get().n;
+  const after = (await ctx.db.get('SELECT COUNT(*) AS n FROM scan_events')).n;
   assert.equal(after, before, 'preview must be side-effect free');
 });
 
@@ -624,7 +657,7 @@ test('database backup is created, listed and downloadable', async () => {
   const created = await call(ctx, 'POST', '/api/system/backups', { token: admin.token });
   assert.equal(created.status, 201);
   const file = created.body.data.file;
-  assert.match(file, /^transitsync-\d{8}-\d{6}\.db$/);
+  assert.match(file, /^transitsync-\d{8}-\d{6}\.sql$/);
   assert.ok(created.body.data.sizeBytes > 0);
 
   const list = await call(ctx, 'GET', '/api/system/backups', { token: admin.token });
@@ -632,7 +665,11 @@ test('database backup is created, listed and downloadable', async () => {
 
   const download = await call(ctx, 'GET', `/api/system/backups/${file}`, { token: admin.token, raw: true });
   assert.equal(download.status, 200);
-  assert.match(download.text.slice(0, 15), /^SQLite format 3/);
+  // The backup is a logical SQL dump (SHOW CREATE TABLE + INSERT INTO).
+  assert.match(download.headers['content-disposition'], /attachment; filename="transitsync-\d{8}-\d{6}\.sql"/);
+  assert.match(download.text, /^-- TransitSync logical database backup/);
+  assert.match(download.text, /CREATE TABLE/);
+  assert.match(download.text, /INSERT INTO/);
 
   const removed = await call(ctx, 'DELETE', `/api/system/backups/${file}`, { token: admin.token });
   assert.equal(removed.status, 200);
@@ -668,7 +705,7 @@ test('creating a user returns a one-time temporary password', async () => {
     body: {
       email: `onboard-${Date.now()}@transitsync.edu.np`,
       fullName: 'Newly Onboarded Staff',
-      roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
+      roleId: await roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
       temporaryPassword: 'WelcomePass!2024',
       forcePasswordChange: true,
     },
@@ -686,7 +723,7 @@ test('a blank temporary password creates a passwordless invited account', async 
     body: {
       email,
       fullName: 'Invited Staff',
-      roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
+      roleId: await roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
       forcePasswordChange: true,
     },
   });
@@ -739,7 +776,7 @@ test('check-email reports NOT_FOUND (404) and accepts a simple temporary passwor
     body: {
       email,
       fullName: 'Simple Credential',
-      roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
+      roleId: await roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
       temporaryPassword: 'abc',
       forcePasswordChange: true,
     },
@@ -761,7 +798,7 @@ test('check-email reports a suspended account as 403 without leaking the passwor
     body: {
       email,
       fullName: 'Suspended Staff',
-      roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
+      roleId: await roleIdOf(ctx, ROLE_KEYS.ATTENDANT),
       temporaryPassword: 'Kestrel!2026',
       forcePasswordChange: true,
     },
@@ -782,7 +819,7 @@ test('check-email reports a suspended account as 403 without leaking the passwor
   const inviteEmail = `suspended-invite-${Date.now()}@transitsync.edu.np`;
   const invite = await call(ctx, 'POST', '/api/users', {
     token: admin.token,
-    body: { email: inviteEmail, fullName: 'Suspended Invite', roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT) },
+    body: { email: inviteEmail, fullName: 'Suspended Invite', roleId: await roleIdOf(ctx, ROLE_KEYS.ATTENDANT) },
   });
   assert.equal(invite.body.data.user.status, 'invited');
   await call(ctx, 'PATCH', `/api/users/${invite.body.data.user.id}`, {
@@ -801,7 +838,7 @@ test('admin-issued password reset invalidates the old credential', async () => {
     body: {
       email,
       fullName: 'Reset Target',
-      roleId: roleIdOf(ctx, ROLE_KEYS.TRANSPORT_STAFF),
+      roleId: await roleIdOf(ctx, ROLE_KEYS.TRANSPORT_STAFF),
       temporaryPassword: 'Copper3Beacon!',
       forcePasswordChange: false,
     },
@@ -825,7 +862,7 @@ test('deleting a user soft-deletes and frees the email for reuse policy', async 
   const email = `delete-${Date.now()}@transitsync.edu.np`;
   const created = await call(ctx, 'POST', '/api/users', {
     token: admin.token,
-    body: { email, fullName: 'Doomed Account', roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT), temporaryPassword: 'Harbour7Lantern!' },
+    body: { email, fullName: 'Doomed Account', roleId: await roleIdOf(ctx, ROLE_KEYS.ATTENDANT), temporaryPassword: 'Harbour7Lantern!' },
   });
   const userId = created.body.data.user.id;
 
@@ -840,7 +877,7 @@ test('a suspended account can be purged (hard-deleted)', async () => {
   const email = `purge-${Date.now()}@transitsync.edu.np`;
   const created = await call(ctx, 'POST', '/api/users', {
     token: admin.token,
-    body: { email, fullName: 'Purge Me', roleId: roleIdOf(ctx, ROLE_KEYS.ATTENDANT), temporaryPassword: 'Harbour7Lantern!' },
+    body: { email, fullName: 'Purge Me', roleId: await roleIdOf(ctx, ROLE_KEYS.ATTENDANT), temporaryPassword: 'Harbour7Lantern!' },
   });
   const userId = created.body.data.user.id;
 
@@ -855,7 +892,7 @@ test('a suspended account can be purged (hard-deleted)', async () => {
   assert.equal(purged.status, 200);
 
   // The row is gone entirely, not merely soft-deleted.
-  const found = ctx.db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
+  const found = await ctx.db.get('SELECT id FROM users WHERE id = ?', userId);
   assert.equal(found, undefined);
 
   const list = await call(ctx, 'GET', `/api/users?search=${encodeURIComponent(email)}`, { token: admin.token });
@@ -904,14 +941,15 @@ test('SSE stream is authenticated, permission filtered, and delivers live scans'
   let buffer = '';
 
   // Drain until a scan event arrives, or give up.
-  const student = ctx.db
-    .prepare("SELECT * FROM students WHERE card_status = 'ACTIVE' AND status='ACTIVE' AND bus_id IS NOT NULL LIMIT 1")
-    .get();
+  const student = await ctx.db.get(
+    "SELECT * FROM students WHERE card_status = 'ACTIVE' AND status='ACTIVE' LIMIT 1",
+  );
+  const bus = await ctx.db.get("SELECT id FROM buses WHERE status = 'ACTIVE' ORDER BY id LIMIT 1");
 
   const tapPromise = fetch(`${ctx.baseUrl}/api/simulator/tap`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${admin.token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rfidSerial: student.rfid_serial, busId: student.bus_id, gate: 'SSE Test' }),
+    body: JSON.stringify({ rfidSerial: student.rfid_serial, busId: bus.id, gate: 'SSE Test' }),
   });
 
   const deadline = Date.now() + 8000;
@@ -949,10 +987,10 @@ test('SSE stream is refused for a role with no channel permission', async () => 
     body: {
       email,
       fullName: 'No Stream Access',
-      roleId: roleIdOf(ctx, ROLE_KEYS.TRANSPORT_STAFF),
+      roleId: await roleIdOf(ctx, ROLE_KEYS.TRANSPORT_STAFF),
       temporaryPassword: 'Slate9Marble!',
       permissionsMode: 'CUSTOM',
-      permissions: ['students:read'],
+      permissions: ['settings:read'],
       forcePasswordChange: false,
     },
   });

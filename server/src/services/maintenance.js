@@ -39,14 +39,16 @@ export const DEFAULT_INSTITUTION_MAINTENANCE_MESSAGE = 'This campus transport sy
 export const TENANT_MAINTENANCE_REJECTION = 'Your campus transport server is under maintenance. Please try again later.';
 
 /** Read the current maintenance state. Never throws (settings may pre-date 005). */
-export function getMaintenance(db = getDb()) {
+export async function getMaintenance(db = getDb()) {
   let isMaintenanceMode = false;
   let message = DEFAULT_MAINTENANCE_MESSAGE;
 
   try {
-    const rows = db
-      .prepare('SELECT key, value FROM settings WHERE key IN (?, ?)')
-      .all(MAINTENANCE_MODE_KEY, MAINTENANCE_MESSAGE_KEY);
+    const rows = await db.all(
+      'SELECT `key`, value FROM settings WHERE `key` IN (?, ?)',
+      MAINTENANCE_MODE_KEY,
+      MAINTENANCE_MESSAGE_KEY,
+    );
     for (const row of rows) {
       if (row.key === MAINTENANCE_MODE_KEY) isMaintenanceMode = String(row.value) === 'true';
       if (row.key === MAINTENANCE_MESSAGE_KEY && row.value) message = String(row.value);
@@ -59,14 +61,12 @@ export function getMaintenance(db = getDb()) {
 }
 
 /** True once a Level 200 Super Administrator account exists. */
-export function hasSuperAdmin(db = getDb()) {
-  const row = db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM users u
-         JOIN roles r ON r.id = u.role_id
-        WHERE r.key = 'super_admin'`,
-    )
-    .get();
+export async function hasSuperAdmin(db = getDb()) {
+  const row = await db.get(
+    `SELECT COUNT(*) AS n FROM users u
+       JOIN roles r ON r.id = u.role_id
+      WHERE r.\`key\` = 'super_admin'`,
+  );
   return row.n > 0;
 }
 
@@ -75,8 +75,8 @@ export function hasSuperAdmin(db = getDb()) {
  * would lock out every campus account with nobody able to turn it back off, so
  * this refuses the transition instead.
  */
-export function assertMaintenanceSwitchable(db, enabling) {
-  if (enabling && !hasSuperAdmin(db)) {
+export async function assertMaintenanceSwitchable(db, enabling) {
+  if (enabling && !(await hasSuperAdmin(db))) {
     throw conflict(
       'Cannot enable maintenance mode: no Super Administrator exists to disable it again. Set SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD first.',
     );
@@ -84,23 +84,25 @@ export function assertMaintenanceSwitchable(db, enabling) {
 }
 
 /** Persist any subset of the maintenance state and return the fresh value. */
-export function setMaintenance(db, { enabled, message, updatedBy = null } = {}) {
-  if (enabled !== undefined) assertMaintenanceSwitchable(db, Boolean(enabled));
+export async function setMaintenance(db, { enabled, message, updatedBy = null } = {}) {
+  if (enabled !== undefined) await assertMaintenanceSwitchable(db, Boolean(enabled));
 
-  const upsert = db.prepare(
-    `INSERT INTO settings (key, value, label, group_name, value_type, updated_by, updated_at)
-     VALUES (?, ?, ?, 'operations', ?, ?, datetime('now'))
-     ON CONFLICT(key) DO UPDATE SET
-       value = excluded.value,
-       updated_by = excluded.updated_by,
-       updated_at = datetime('now')`,
-  );
+  const upsert = async (key, value, label, valueType) =>
+    db.run(
+      `INSERT INTO settings (\`key\`, value, label, group_name, value_type, updated_by, updated_at)
+       VALUES (?, ?, ?, 'operations', ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE
+         value = VALUES(value),
+         updated_by = VALUES(updated_by),
+         updated_at = NOW()`,
+      key, value, label, valueType, updatedBy,
+    );
 
   if (enabled !== undefined) {
-    upsert.run(MAINTENANCE_MODE_KEY, String(Boolean(enabled)), 'Maintenance mode', 'boolean', updatedBy);
+    await upsert(MAINTENANCE_MODE_KEY, String(Boolean(enabled)), 'Maintenance mode', 'boolean');
   }
   if (message !== undefined && message !== null) {
-    upsert.run(MAINTENANCE_MESSAGE_KEY, String(message), 'Maintenance message', 'string', updatedBy);
+    await upsert(MAINTENANCE_MESSAGE_KEY, String(message), 'Maintenance message', 'string');
   }
 
   return getMaintenance(db);
@@ -114,16 +116,15 @@ export function setMaintenance(db, { enabled, message, updatedBy = null } = {}) 
  * Read one campus's maintenance state. Returns null when the tenant does not
  * exist, has been purged, or the institutions table is absent (pre-005 DB).
  */
-export function getInstitutionMaintenance(db, tenantId) {
+export async function getInstitutionMaintenance(db, tenantId) {
   if (!tenantId) return null;
   let institution;
   try {
-    institution = db
-      .prepare(
-        `SELECT id, name, is_maintenance_mode, maintenance_message
-           FROM institutions WHERE id = ?`,
-      )
-      .get(String(tenantId));
+    institution = await db.get(
+      `SELECT id, name, is_maintenance_mode, maintenance_message
+         FROM institutions WHERE id = ?`,
+      String(tenantId),
+    );
   } catch {
     return null;
   }
@@ -144,12 +145,12 @@ export function getInstitutionMaintenance(db, tenantId) {
  * the address belongs to no known tenant (including the cross-tenant Super
  * Administrator, who has no campus).
  */
-export function resolveTenantMaintenanceByEmail(db, email) {
+export async function resolveTenantMaintenanceByEmail(db, email) {
   if (!email) return null;
-  const user = db.prepare('SELECT tenant_id FROM users WHERE LOWER(email) = LOWER(?)').get(String(email));
+  const user = await db.get('SELECT tenant_id FROM users WHERE LOWER(email) = LOWER(?)', String(email));
   if (user?.tenant_id) return getInstitutionMaintenance(db, user.tenant_id);
 
-  const student = db.prepare('SELECT tenant_id FROM students WHERE LOWER(email) = LOWER(?)').get(String(email));
+  const student = await db.get('SELECT tenant_id FROM students WHERE LOWER(email) = LOWER(?)', String(email));
   if (student?.tenant_id) return getInstitutionMaintenance(db, student.tenant_id);
 
   return null;
@@ -183,10 +184,10 @@ export function institutionMaintenanceRejection(maintenance) {
  * `tenantId` must resolve to a live (non-purged) institution. The route layer
  * owns auditing; this service only touches the institutions row.
  */
-export function setInstitutionMaintenance(db, { tenantId, enabled, message } = {}) {
+export async function setInstitutionMaintenance(db, { tenantId, enabled, message } = {}) {
   if (!tenantId) throw badRequest('No campus context for maintenance mode. This account is not attached to an institution.');
 
-  const institution = db.prepare('SELECT id, deleted_at FROM institutions WHERE id = ?').get(String(tenantId));
+  const institution = await db.get('SELECT id, deleted_at FROM institutions WHERE id = ?', String(tenantId));
   if (!institution || institution.deleted_at) throw notFound('Campus');
 
   const nextEnabled = enabled === undefined ? false : Boolean(enabled);
@@ -195,13 +196,14 @@ export function setInstitutionMaintenance(db, { tenantId, enabled, message } = {
       ? DEFAULT_INSTITUTION_MAINTENANCE_MESSAGE
       : String(message);
 
-  db.prepare(
+  await db.run(
     `UPDATE institutions
         SET is_maintenance_mode = ?,
             maintenance_message = ?,
-            updated_at = datetime('now')
+            updated_at = NOW()
       WHERE id = ?`,
-  ).run(Number(nextEnabled), nextMessage, institution.id);
+    Number(nextEnabled), nextMessage, institution.id,
+  );
 
   return getInstitutionMaintenance(db, institution.id);
 }

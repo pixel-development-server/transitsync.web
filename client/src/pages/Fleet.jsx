@@ -20,6 +20,8 @@ import { useAuth } from '../lib/auth.jsx';
 import { useApi, useDebounced } from '../lib/hooks.js';
 import { useToast } from '../lib/toast.jsx';
 import { titleCase } from '../lib/format.js';
+import { useEventStream } from '../lib/stream.js';
+import { useBusStatusClock, evaluateBusStatus } from '../utils/busStatus.js';
 import { CampusSelect, useCampusDirectory, usePlatformScope } from '../components/CampusScope.jsx';
 
 const TABS = [
@@ -37,6 +39,41 @@ const EMPTY_ROUTE = {
   code: '', name: '', description: '', startPoint: '', endPoint: '',
   shift: 'MORNING', departureTime: '07:00', arrivalTime: '09:00', color: '#38BDF8', isActive: true, tenantId: '',
 };
+
+/**
+ * Resolve the status to show for a bus row.
+ *
+ * `row.status` is the *lifecycle* state a fleet manager sets (ACTIVE /
+ * MAINTENANCE / RETIRED) and stays authoritative — a bus in maintenance or one
+ * that has been retired must never be painted "Active" just because its route's
+ * timetable says a service is running. Only a bus whose lifecycle is ACTIVE is
+ * actually on the road, and only then do we overlay the timetable-derived status
+ * so its badge ages with the Nepali clock.
+ *
+ * @returns {ReturnType<typeof evaluateBusStatus>|null} null → fall back to `row.status`
+ */
+function resolveBusStatus(row, now) {
+  if (row?.status === 'ACTIVE' && row.departureTime && row.arrivalTime) {
+    return evaluateBusStatus({ departureTime: row.departureTime, arrivalTime: row.arrivalTime }, now);
+  }
+  return null;
+}
+
+/**
+ * The Status column cell.
+ *
+ * `Badge` already owns the tone palette and exposes a `tone` prop, so the
+ * dynamic vocabulary (good / warn / info / neutral) is passed straight through
+ * rather than being funnelled through `StatusBadge`'s enum map — that keeps
+ * `StatusBadge`'s public API untouched for its many other callers. Rows without
+ * a usable timetable (or a non-ACTIVE lifecycle) keep the exact previous
+ * rendering. `now` is threaded in from the tab's single status clock.
+ */
+function BusStatusCell({ row, now }) {
+  const dynamic = resolveBusStatus(row, now);
+  if (dynamic) return <Badge tone={dynamic.tone} dot>{dynamic.label}</Badge>;
+  return <StatusBadge status={row.status} />;
+}
 
 function BusDialog({ open, onClose, onSaved, bus, routes, isPlatform, tenantId, colleges = [] }) {
   const toast = useToast();
@@ -272,19 +309,19 @@ function StopsDialog({ open, onClose, onSaved, route }) {
           <ul className="space-y-2">
             {stops.map((stop, index) => (
               <li key={index} className="rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-sunken)] p-2.5">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-sky-500/12 text-[0.7rem] font-bold text-sky-400">
                     {index + 1}
                   </span>
                   <Input
-                    wrapperClass="flex-1"
+                    wrapperClass="min-w-0 flex-1"
                     placeholder="Stop name"
                     value={stop.name}
                     onChange={(event) => update(index, 'name', event.target.value)}
                     disabled={saving}
                   />
                   <Input
-                    wrapperClass="w-28"
+                    wrapperClass="min-w-[6rem] flex-1 sm:w-28 sm:flex-none"
                     type="time"
                     value={stop.scheduledTime ?? ''}
                     onChange={(event) => update(index, 'scheduledTime', event.target.value)}
@@ -490,6 +527,27 @@ function BusesTab({ onEdit, tenantId, isPlatform }) {
   const buses = data?.buses ?? [];
   const summary = data?.summary;
 
+  // One clock for the whole table rather than a `useBusStatus` hook per row: a
+  // hook per row would mount its own 30s interval and visibilitychange listener
+  // for every bus, so a 60-bus fleet would spin up 60 timers all firing on the
+  // same tick. A single clock re-renders the table every 30s and each row
+  // classifies itself with the pure `evaluateBusStatus`, which is cheaper and
+  // keeps every badge in lock-step.
+  const { now } = useBusStatusClock();
+
+  // Realtime CRUD fan-out: a bus change anywhere refreshes this list without a
+  // manual reload. A route edit also matters here because the joined timetable
+  // and colour ride on each bus row, so we listen to both channels.
+  const { subscribe } = useEventStream({ enabled: can('fleet:read') });
+  useEffect(() => {
+    const offBus = subscribe('bus_updated', () => reload({ silent: true }));
+    const offRoute = subscribe('route_updated', () => reload({ silent: true }));
+    return () => {
+      offBus();
+      offRoute();
+    };
+  }, [subscribe, reload]);
+
   const confirmDelete = async () => {
     setDeleteBusy(true);
     try {
@@ -539,6 +597,7 @@ function BusesTab({ onEdit, tenantId, isPlatform }) {
     {
       key: 'driver',
       label: 'Driver',
+      hideBelow: 'lg',
       render: (row) =>
         row.driverName ? (
           <div className="min-w-0">
@@ -558,6 +617,7 @@ function BusesTab({ onEdit, tenantId, isPlatform }) {
     {
       key: 'allocated',
       label: 'Allocated',
+      hideBelow: 'xl',
       align: 'center',
       nowrap: true,
       render: (row) => <span className="tabular text-[0.78rem] text-mist-300">{row.assignedStudents ?? 0}</span>,
@@ -566,7 +626,7 @@ function BusesTab({ onEdit, tenantId, isPlatform }) {
       key: 'status',
       label: 'Status',
       nowrap: true,
-      render: (row) => <StatusBadge status={row.status} />,
+      render: (row) => <BusStatusCell row={row} now={now} />,
     },
     {
       key: 'actions',
@@ -625,7 +685,7 @@ function BusesTab({ onEdit, tenantId, isPlatform }) {
       <div className="card mb-4 p-3.5">
         <FilterBar onClear={search || status ? () => { setSearch(''); setStatus(''); } : undefined}>
           <Input
-            wrapperClass="min-w-[13rem] flex-1"
+            wrapperClass="w-full min-w-0 flex-1 sm:min-w-[13rem]"
             placeholder="Search by code, name or registration…"
             icon="search"
             value={search}
@@ -633,7 +693,7 @@ function BusesTab({ onEdit, tenantId, isPlatform }) {
             aria-label="Search buses"
           />
           <Select
-            wrapperClass="w-44"
+            wrapperClass="w-full sm:w-44"
             label="Status"
             value={status}
             onChange={(event) => setStatus(event.target.value)}
@@ -684,6 +744,19 @@ function RoutesTab({ onEdit, tenantId, isPlatform }) {
 
   const routes = data?.routes ?? [];
 
+  // Realtime CRUD fan-out. Routes listen to their own channel plus `bus_updated`
+  // because the "Buses" column is a live count of buses assigned to the route —
+  // creating or deleting a bus changes it.
+  const { subscribe } = useEventStream({ enabled: can('fleet:read') });
+  useEffect(() => {
+    const offRoute = subscribe('route_updated', () => reload({ silent: true }));
+    const offBus = subscribe('bus_updated', () => reload({ silent: true }));
+    return () => {
+      offRoute();
+      offBus();
+    };
+  }, [subscribe, reload]);
+
   const confirmDelete = async () => {
     setDeleteBusy(true);
     try {
@@ -715,6 +788,7 @@ function RoutesTab({ onEdit, tenantId, isPlatform }) {
     {
       key: 'path',
       label: 'Path',
+      hideBelow: 'lg',
       render: (row) => (
         <p className="max-w-xs truncate text-[0.76rem] text-mist-300" title={`${row.startPoint} → ${row.endPoint}`}>
           {row.startPoint} <Icon name="arrowRight" className="mx-1 inline h-3 w-3 text-mist-500" />
@@ -738,6 +812,7 @@ function RoutesTab({ onEdit, tenantId, isPlatform }) {
     {
       key: 'stops',
       label: 'Stops',
+      hideBelow: 'xl',
       align: 'center',
       nowrap: true,
       render: (row) => <span className="tabular text-[0.78rem] text-mist-300">{row.stopCount ?? row.stops?.length ?? 0}</span>,
@@ -745,6 +820,7 @@ function RoutesTab({ onEdit, tenantId, isPlatform }) {
     {
       key: 'buses',
       label: 'Buses',
+      hideBelow: 'md',
       align: 'center',
       nowrap: true,
       render: (row) => <span className="tabular text-[0.78rem] text-mist-300">{row.busCount ?? 0}</span>,
@@ -893,7 +969,7 @@ export default function Fleet() {
             </button>
           ))}
         </div>
-        <CampusSelect isPlatform={isPlatform} colleges={colleges} value={tenantId} onChange={setTenantId} wrapperClass="w-60" />
+        <CampusSelect isPlatform={isPlatform} colleges={colleges} value={tenantId} onChange={setTenantId} wrapperClass="w-full sm:w-60" />
       </div>
 
       {tab === 'buses' ? (

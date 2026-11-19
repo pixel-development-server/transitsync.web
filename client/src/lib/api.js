@@ -18,16 +18,31 @@
 const TOKEN_KEY = 'transitsync.token';
 
 /**
- * Origin of the TransitSync API.
+ * API location, resolved from `VITE_API_URL` at build time.
  *
- * Empty means "same origin" — the default, where the Node server serves both
- * the panel and the API. Set `VITE_API_URL` (e.g. `https://api.transitsync.me`)
- * at build time when the panel is hosted separately from the backend, such as
- * on GitHub Pages: every REST call and the SSE stream are then prefixed with it.
+ * Accepted shapes:
+ *   - unset / empty  → same-origin `/api` (the Node server serves the panel and
+ *     the API together; this is the default homelab/production setup).
+ *   - `/api`         → treated as the API root as-is (no doubled `/api/api`).
+ *   - a bare path    → `/path` gets `/api` appended.
+ *   - a full origin  → `https://api.example.com` gets `/api` appended, for a
+ *     panel hosted separately from the backend.
+ *
+ * `API_BASE` is the value every call is prefixed with; `API_ORIGIN` keeps the
+ * historical export for callers that only need the origin.
  */
-export const API_ORIGIN = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '');
+const RAW_API_URL = (import.meta.env.VITE_API_URL ?? '').trim().replace(/\/+$/, '');
 
-/** True when the API lives on a different origin than the panel. */
+export const API_ORIGIN = /^https?:\/\//i.test(RAW_API_URL) ? RAW_API_URL : '';
+
+export const API_BASE =
+  RAW_API_URL === ''
+    ? '/api'
+    : RAW_API_URL.toLowerCase().endsWith('/api')
+      ? RAW_API_URL
+      : `${RAW_API_URL}/api`;
+
+/** True only when the API lives on a genuinely different origin. */
 const CROSS_ORIGIN = API_ORIGIN !== '';
 
 export class ApiError extends Error {
@@ -117,7 +132,7 @@ async function request(method, path, { body, params, signal, raw = false, header
 
   let response;
   try {
-    response = await fetch(`${API_ORIGIN}/api${path}${buildQuery(params)}`, init);
+    response = await fetch(`${API_BASE}${path}${buildQuery(params)}`, init);
   } catch (cause) {
     if (cause?.name === 'AbortError') throw cause;
     throw new ApiError({
@@ -182,7 +197,17 @@ function toErrorFromPayload(payload, status) {
     return err;
   }
 
-  return new ApiError({ code, message, details: Array.isArray(error.details) ? error.details : [], status });
+  const err = new ApiError({ code, message, details: Array.isArray(error.details) ? error.details : [], status });
+
+  // "Halt, but here is what to do next" replies (forced password rotation) are
+  // sent as HTTP 200 with `success: false` and a top-level flag rather than an
+  // `error` object. Carry that payload onto the thrown error so callers can
+  // branch on `requireNewPassword` instead of rendering a failure.
+  if (payload?.requireNewPassword) {
+    err.requireNewPassword = true;
+    err.data = payload.data ?? null;
+  }
+  return err;
 }
 
 function defaultMessage(status) {
