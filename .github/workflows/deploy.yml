@@ -179,7 +179,7 @@ jobs:
         shell: powershell
         run: |
           $task = 'TransitSync-Web'
-          if (Get-ScheduledTask -Name $task -ErrorAction SilentlyContinue) {
+          if (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue) {
             Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
             Start-ScheduledTask -TaskName $task
