@@ -56,6 +56,9 @@ lerna-debug.log*
 *.pid
 transitsync-service.active
 
+# Local Cloudflare Worker deployment config (use wrangler.toml.example)
+deploy/cloudflare/wrangler.toml
+
 # Editors / OS
 .DS_Store
 Thumbs.db
